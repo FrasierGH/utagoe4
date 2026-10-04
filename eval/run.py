@@ -58,12 +58,17 @@ def load_stems(folder, seconds, start):
 
 def songs(args):
     if args.stems:
-        for d in sorted(glob.glob(os.path.join(args.stems, '*'))):
-            if os.path.exists(os.path.join(d, 'vocals.wav')):
-                yield os.path.basename(d), lambda d=d: load_stems(d, args.seconds, args.start)
+        dirs = [d for d in sorted(glob.glob(os.path.join(args.stems, '*'))) if os.path.exists(os.path.join(d, 'vocals.wav'))]
+        for d in dirs[: args.limit or None]:
+            yield os.path.basename(d), lambda d=d: load_stems(d, args.seconds, args.start)
     else:
         for s in range(args.songs):
             yield f'synth{s}', lambda s=s: synth.song(1000 + s, args.seconds)
+
+
+def short(name):
+    """A filesystem-friendly case folder name for a song title."""
+    return ''.join(c if c.isalnum() else '_' for c in name)[:40]
 
 
 def build_case(song_dir, scenario, make):
@@ -104,6 +109,7 @@ def main():
     ap.add_argument('--seconds', type=float, default=30.0)
     ap.add_argument('--stems', help='folder of real multitrack songs instead of synthetic ones')
     ap.add_argument('--start', type=float, default=30.0, help='excerpt start for --stems (s)')
+    ap.add_argument('--limit', type=int, default=0, help='only the first N --stems songs')
     ap.add_argument('--scenarios', default=','.join(degrade.SCENARIOS))
     ap.add_argument('--engines', default=','.join(['3.0'] + list(proto.ENGINES)))
     ap.add_argument('--metric', default='median_sdr', choices=['median_sdr', 'sdr', 'si_sdr', 'bleed'])
@@ -114,19 +120,19 @@ def main():
 
     rows = []
     for song, make in songs(args):
-        song_dir = os.path.join(WORK, 'cases', tag, song)
+        song_dir = os.path.join(WORK, 'cases', tag, short(song))
         for sc in scenarios:
             case = build_case(song_dir, sc, make)
             target, _ = sf.read(case['target'], always_2d=True)
             mix, _ = sf.read(case['mix'], always_2d=True)
             for en in engines:
-                out = os.path.join(WORK, 'out', en, tag, song, sc + '.wav')
+                out = os.path.join(WORK, 'out', en, tag, short(song), sc + '.wav')
                 t0 = time.time()
                 run_engine(en, case, out)
                 est, _ = sf.read(out, always_2d=True)
                 r = dict(song=song, scenario=sc, engine=en, **metrics.score(target, est, mix))
                 rows.append(r)
-                print(f'{song:>10} {sc:>12} {en:>20}  median SDR {r["median_sdr"]:6.2f} dB'
+                print(f'{song[:24]:>24} {sc:>12} {en:>14}  median SDR {r["median_sdr"]:6.2f} dB'
                       f'  SDR {r["sdr"]:6.2f}  SI-SDR {r["si_sdr"]:6.2f}  bleed {r["bleed"]:7.2f}'
                       f'  ({time.time() - t0:.1f} s)', flush=True)
 

@@ -38,8 +38,16 @@ improvement gets its own engine.
 Synthetic songs are for development; changes should be confirmed on real multitracks.
 `--stems DIR` takes a folder of song folders, each with `vocals.wav` and either
 `accompaniment.wav` or `drums.wav`, `bass.wav` and `other.wav` (the MUSDB18-HQ layout),
-44.1 kHz. A 30 s excerpt starting at `--start` (30 s) is used. Datasets are not part of
-the repository.
+44.1 kHz. A 30 s excerpt starting at `--start` (30 s) is used; `--limit N` takes the
+first N songs. Datasets are not part of the repository.
+
+MUSDB18-HQ ([Zenodo](https://zenodo.org/records/3338373), 22.7 GB zip, open access,
+non-commercial use only) has 50 test songs in that layout:
+
+```bash
+python eval/prepare_musdb.py musdb18hq.zip D:/datasets/musdb18hq --md5 12d4f2ecd55245a4688754dd76363103 --delete-zip
+python eval/run.py --stems D:/datasets/musdb18hq/test
+```
 
 ## Results so far
 
