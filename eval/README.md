@@ -53,37 +53,54 @@ python eval/run.py --stems D:/datasets/musdb18hq/test
 
 Median SDR in dB (higher is better), mean of 3 synthetic 30 s songs:
 
-| scenario | 3.0 | proto-scalar | proto-eq |
-|---|---:|---:|---:|
-| clean | 27.23 | 27.32 | 27.07 |
-| level | 27.25 | 27.32 | 28.61 |
-| master_eq | 3.46 | 3.92 | **26.38** |
-| master_full | 1.18 | 1.17 | **25.56** |
-| offset_frac | 25.62 | 25.69 | 26.78 |
-| drift | 25.64 | -1.20 | 0.33 |
-| mp3 | 19.24 | 19.31 | 18.23 |
-| everything | 0.17 | -2.98 | 2.09 |
+| scenario | 3.0 | proto-scalar | proto-eq | proto-eq-align |
+|---|---:|---:|---:|---:|
+| clean | 27.23 | 27.32 | 27.31 | 27.30 |
+| level | 27.25 | 27.32 | 28.99 | 28.99 |
+| master_eq | 3.46 | 3.92 | **26.56** | **26.52** |
+| master_full | 1.18 | 1.17 | **25.92** | **25.92** |
+| offset_frac | 25.62 | 25.69 | 27.04 | 27.06 |
+| drift | 25.64 | -1.20 | 0.23 | **27.08** |
+| mp3 | 19.24 | 19.31 | 18.81 | 18.80 |
+| everything | 0.17 | -2.98 | 2.16 | **14.50** |
+| mean | 16.22 | 12.57 | 19.63 | **24.52** |
 
-Bleed where the vocal is silent: 3.0 leaves the instrumental at -11 dB (EQ'd master)
-and -8 dB (full master); `proto-eq` gets -43 and -41 dB.
+Bleed (instrumental left where the vocal is silent, dB, lower is better): 3.0 leaves
+-11 / -8 dB on the mastered scenarios and -7 dB on `everything`; `proto-eq-align` gets
+-43 / -41 and -19 dB.
 
 **1. Per-band EQ matching (`proto-eq`).** Instead of one level, estimate a complex
-gain per frequency bin, `H(f) = sum O conj(K) / sum |K|^2`, smoothed over 1/3 octave,
-and subtract `H K`. Findings:
+gain per frequency bin and subtract `H K`. Findings:
 
 * It is what makes mastered albums work at all: 3.0 drops to 1-3 dB there.
-* It also corrects a residual sub-sample offset (a linear phase), hence the gain on
+* The phase of `H` also corrects a residual sub-sample offset, hence the gain on
   `offset_frac` and `level`.
-* Estimated from every cell, the vocal adds noise to `H`: 1/6 octave cost 2 dB on
-  `clean`. Two passes fix this. The second estimate only uses the cells the first says
-  the instrumental dominates. With 1/3 octave that is within 0.25 dB of 3.0 on `clean`.
-  Wider smoothing (2/3, 1 octave) scored the same on these songs, but 1/3 is kept for
-  narrow EQ moves on real masters.
+* Estimated from every cell, the vocal adds noise to `H`: at 1/6 octave that cost
+  2 dB on `clean`. Two passes fix it: the second only uses the cells the first says
+  the instrumental dominates. Smoothing is 1/3 octave (2/3 and 1 octave scored the
+  same here; 1/3 keeps narrow EQ moves on real masters).
+* `|H|` comes from the power ratio of those cells, `sqrt(sum |O|^2 / sum |K|^2)`, with
+  the phase of the cross-spectrum. Least squares (`sum O conj(K) / sum |K|^2`) is
+  biased low when the karaoke carries noise of its own (MP3 coding noise above
+  4 kHz): the power ratio gained 0.6 dB on `mp3` and 0.2-0.4 dB everywhere else.
 * A per-frame level correction on top (for compression) made every scenario
   0.5-1 dB worse, so it is off.
-* MP3 is about 1 dB worse than 3.0. Not yet understood.
 
-**Next: alignment.** The prototype aligns the whole file once, so it fails on
-`drift` (and `everything`), which 3.0 handles by re-searching the offset per block.
-Time-varying (and sub-sample) alignment is the next improvement; until then the
-`drift` and `everything` rows say nothing about EQ matching.
+**2. Time-varying, sub-sample alignment (`proto-eq-align`).** The lag is measured in
+4 s windows every 2 s: GCC-PHAT for the integer part, the slope of the
+cross-spectrum phase (100 Hz - 8 kHz) for the fraction. A weighted straight line is
+fitted with outliers dropped (clock drift), falling back to a smoothed curve when a
+line doesn't fit. A second pass re-measures after aligning, because drift within a
+window (5 samples at 30 ppm) biases the first. Measured accuracy: 0.07 samples on a
+constant 1234.37-sample offset; drift is tracked to the same accuracy. The
+karaoke isn't resampled for the subtraction: each STFT frame is cut at its own
+integer lag and the fraction is applied as a linear phase (error -77 dB up to
+20 kHz). Result: `drift` goes from failing to 27.1 dB (3.0: 25.6), `everything` from
+2.2 to 14.5 dB (3.0: 0.2).
+
+**Open:**
+
+* `mp3` is 0.4 dB below 3.0, all of it above 10 kHz.
+* Below 200 Hz every engine, 3.0 included, leaves error above the vocal's own energy
+  there (bass and kick leaking into the vocal).
+* Everything is still synthetic; next is confirming on MUSDB18-HQ.
