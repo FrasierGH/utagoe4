@@ -1,3 +1,24 @@
+# 歌声りっぷ (Utagoe Rip) 4 — in development
+
+This is the development line after the faithful 3.0 rebuild (which stays as it is at
+[FrasierGH/utagoe](https://github.com/FrasierGH/utagoe)). The goal is better
+extraction, measured against 3.0 rather than judged by ear:
+
+1. **Per-band EQ matching**: subtract the instrumental as it was EQ'd in the album
+   master, not just at the right level. Prototyped: on mastered albums it lifts the
+   result from 1–3 dB to about 26 dB SDR (see [eval/README.md](eval/README.md)).
+2. **Time-varying, sub-sample alignment**: handle clock drift between releases.
+3. **Soft masking**: fewer "watery" artifacts than keeping or deleting whole bins.
+4. **Multi-resolution analysis**: sharper consonants and drums.
+5. **More formats**: MP3/FLAC/AAC/24-bit input, float output, mismatched rates.
+6. **High-DPI** support and workflow features (batch, A/B preview).
+
+Ideas are prototyped in Python under `eval/`, scored there, and the winners are
+ported to the C++ engine. Until then, everything below describes the 3.0 program
+this line starts from.
+
+---
+
 # 歌声りっぷ (Utagoe Rip)
 
 **Utagoe Rip** is a Japanese freeware tool by TODAKEN (1999–2009) that

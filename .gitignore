@@ -13,5 +13,8 @@ out/
 .vs/
 CMakeUserPresets.json
 
-# tools/rip_assets.py
+# Python (tools/rip_assets.py, eval/)
 __pycache__/
+
+# evaluation cache and results
+eval/work/
