@@ -47,6 +47,9 @@ const Lang LANG_EN = {
     L"(C)1999-2009 TODAKEN\n(C)2013 Partial en_US translation by DjLizard\nwww.DjLizard.net\n\n"
     L"Greets: Babylove, ToastyX, mrb,\nNicknerdface, iliketostayinside,\nall of tumblr #prfm fandom",
     240, 190, 3, 104, 240, 160, 208,
+    L"Utagoe Rip 4", L"Improved extraction (recommended)",
+    L"Matches EQ and level differences between the two releases, follows timing drift and speed "
+    L"wobble, and detects inverted polarity. The settings it takes care of itself are greyed out.",
 };
 
 const Lang LANG_JA = {
@@ -88,6 +91,9 @@ const Lang LANG_JA = {
     {356, 43}, {447, 91}, 97, 73, 119, {21, 32}, {84, 36}, 13, 78, 0, 0, 42, 112,
     L"WAVE再生", L"歌声りっぷについて", L"(C)1999-2009 ＴＯＤＡＫＥＮ ",
     159, 113, 104, 104, 0, 0, 128,
+    L"歌声りっぷ4", L"改良版の抽出方式を使う（推奨）",
+    L"２つの音源のEQ・音量の違いを補正し、時間のずれや回転ムラに追従、逆相も自動で判定します。"
+    L"この方式が自動で行う設定は灰色になります。",
 };
 
 const Lang& pick_language(const std::wstring& code) {

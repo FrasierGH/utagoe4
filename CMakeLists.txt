@@ -26,7 +26,8 @@ add_library(utagoe_engine STATIC
   src/engine/settings.cpp
   src/engine/wav.cpp
   src/engine/dsp.cpp
-  src/engine/engine.cpp)
+  src/engine/engine.cpp
+  src/engine/v4.cpp)
 target_include_directories(utagoe_engine PUBLIC src)
 
 # --- tests (ctest)
@@ -37,6 +38,13 @@ if(NOT MSVC)
   target_link_options(engine_test PRIVATE -municode)
 endif()
 add_test(NAME engine COMMAND engine_test)
+
+# the Utagoe Rip 4 separation from the command line (used by eval/run.py, engine "v4-cpp")
+add_executable(v4_cli tests/v4_cli.cpp)
+target_link_libraries(v4_cli PRIVATE utagoe_engine)
+if(NOT MSVC)
+  target_link_options(v4_cli PRIVATE -municode)
+endif()
 
 # --- the program
 add_executable(utagoe WIN32

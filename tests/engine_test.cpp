@@ -116,6 +116,13 @@ struct Run {
     std::vector<std::wstring> log;
 };
 
+// this harness tests (and, from the command line, runs) the 3.0 engine unless asked otherwise
+Settings settings_30() {
+    Settings c;
+    c.v4 = false;
+    return c;
+}
+
 Run run(const Song& s, Settings cfg, bool original_timing = false, bool single = false) {
     Run r;
     Callbacks cb;
@@ -135,7 +142,7 @@ int self_test() {
     std::printf("synthetic song (8 s, instrumental offset 12345 samples)\n");
     Song s = make_song(8.0, 12345);
     {
-        Run r = run(s, Settings());
+        Run r = run(s, settings_30());
         expect(logged(r, L"Initial offset:12345 phase:0"), "initial offset found");
         expect(r.out.frames() == s.orig.frames(), "output length = original length");
         double v = snr(r.out, s.vocal);
@@ -157,7 +164,7 @@ int self_test() {
         {"normal intro", [](Settings& c) { c.intro_mode = INTRO_NORMAL; }, 15},
     };
     for (const Case& k : cases) {
-        Settings cfg;
+        Settings cfg = settings_30();
         k.set(cfg);
         Run r = run(s, cfg);
         double v = snr(r.out, s.vocal);
@@ -165,13 +172,13 @@ int self_test() {
         expect(v > k.min_snr, k.name);
     }
     {
-        Settings cfg;
+        Settings cfg = settings_30();
         cfg.cntr_flag = cfg.lpf_flag = cfg.hpf_flag = true;
         Run r = run(s, cfg);
         expect(r.out.frames() == s.orig.frames(), "filters + centralization");
     }
     {
-        Run r = run(s, Settings(), true);
+        Run r = run(s, settings_30(), true);
         std::vector<int16_t> shifted(s.vocal.size() + LATENCY, 0);
         std::copy(s.vocal.begin(), s.vocal.end(), shifted.begin() + LATENCY);
         shifted.resize(s.vocal.size());
@@ -180,22 +187,45 @@ int self_test() {
     {
         Song inv = s;
         for (auto& x : inv.inst.data) x = (int16_t)std::max(-32768, std::min(32767, -(int)x));
-        Run r = run(inv, Settings());
+        Run r = run(inv, settings_30());
         expect(logged(r, L"phase:1"), "inverted instrumental detected");
         expect(snr(r.out, s.vocal) > 25, "inverted instrumental extracted");
     }
     {
         Song lead = make_song(8.0, 5000, true);
-        Run r = run(lead, Settings());
+        Run r = run(lead, settings_30());
         expect(logged(r, L"Initial offset:-5000"), "original with longer lead-in");
         expect(snr(r.out, lead.vocal) > 25, "original with longer lead-in extracted");
     }
     {
-        Run r = run(s, Settings(), false, true);
+        Run r = run(s, settings_30(), false, true);
         expect(r.out.data == s.orig.data, "original only, nothing enabled: passes through");
+    }
+    std::printf("Utagoe Rip 4 separation\n");
+    {
+        Settings v = settings_30();
+        v.v4 = true;
+        Run r = run(s, v);
+        expect(logged(r, L"v4 lag:12345 sign:1"), "v4: offset found");
+        expect(r.out.frames() == s.orig.frames(), "v4: output length = original length");
+        double x = snr(r.out, s.vocal);
+        std::printf("        v4 SNR %.1f dB\n", x);
+        expect(x > 25, "v4 recovers the vocal");
+        Song inv = s;
+        for (auto& q : inv.inst.data) q = (int16_t)std::max(-32768, std::min(32767, -(int)q));
+        Run ri = run(inv, v);
+        expect(logged(ri, L"sign:-1"), "v4: inverted instrumental detected");
+        expect(snr(ri.out, s.vocal) > 25, "v4: inverted instrumental extracted");
+        Song lead = make_song(8.0, 5000, true);
+        Run rl = run(lead, v);
+        expect(logged(rl, L"v4 lag:-5000"), "v4: original with longer lead-in");
+        expect(snr(rl.out, lead.vocal) > 25, "v4: original with longer lead-in extracted");
+        v.cntr_flag = v.lpf_flag = v.hpf_flag = true;
+        expect(run(s, v).out.frames() == s.orig.frames(), "v4: filters + centralization");
     }
     {
         Settings d;
+        expect(d.v4, "Utagoe Rip 4 separation is the default");
         expect(std::fabs(d.kvol() - 1.2f) < 1e-6 && d.lpf_hz() == 10000 && d.hpf_hz() == 230 &&
                d.cntr_strength() == 2.0f && d.adpt_range() == 3, "settings conversions");
     }
@@ -212,7 +242,7 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "cannot read input\n");
         return 2;
     }
-    Settings cfg;
+    Settings cfg = settings_30();   // V4Engine=1 on the command line runs v4
     bool original_timing = false;
     std::wstring ini = L"[V30_Option]\r\n";
     for (int i = 4; i < argc; i++) {

@@ -15,6 +15,7 @@ enum {
     IDC_ADPT_AUTO = 270, IDC_ADPT_MANUAL, IDC_ADPT_EDIT, IDC_ADPT_UPDOWN,
     IDC_KVOL = 280, IDC_KLVL, IDC_CFOCUS_CHK, IDC_CFOCUS, IDC_LPF_CHK, IDC_LPF, IDC_HPF_CHK, IDC_HPF,
     IDC_OVSP_CHK = 290, IDC_OVSP, IDC_BSIZE, IDC_KNAME, IDC_VNAME, IDC_VNAME_EDIT,
+    IDC_V4 = 300,
 };
 
 int checked(const std::vector<HWND>& radios) {
@@ -156,6 +157,21 @@ void SettingsForm::build() {
     static_text(p, 8 + l.pos_vname_label, 88, l.vname_label);
     vname_edit_ = edit(p, IDC_VNAME_EDIT, 8 + l.pos_vname_edit, 86, 81, 20, 32);
     leave();
+    // not in the original: the Utagoe Rip 4 separation
+    group(p, 8, 126, 465, 98, l.v4_group);
+    enter(8, 126, 465, 98);
+    v4_chk_ = check(p, IDC_V4, 24, 148, 420, 17, l.v4_check);
+    label(p, 26, 174, l.v4_note, nullptr, 430, 40);
+    leave();
+}
+
+void SettingsForm::update_v4_enable() {
+    bool on3 = !is_checked(v4_chk_);
+    std::vector<HWND> off;
+    for (const auto* g : {&intro_, &merge_, &level_, &data_, &phase_}) off.insert(off.end(), g->begin(), g->end());
+    off.insert(off.end(), {adpt_auto_, adpt_manual_, adpt_edit_, adpt_updown_, klvl_, ovsp_chk_, ovsp_combo_,
+                           bsize_combo_});
+    for (HWND h : off) EnableWindow(h, on3);
 }
 
 void SettingsForm::show_page(int i) {
@@ -188,6 +204,8 @@ void SettingsForm::load(const Settings& c) {
     SetWindowTextW(vname_edit_, c.vname_txt.c_str());
     check_one(phase_, c.krk_phase);
     check_one(qty_, c.sound_qty);
+    set_check(v4_chk_, c.v4);
+    update_v4_enable();
     for (HWND t : {cfocus_, lpf_, hpf_, kvol_, klvl_}) update_labels(t);
 }
 
@@ -244,6 +262,7 @@ void SettingsForm::on_ok() {
     if (c.vname_txt.empty()) c.vname_flg = false;
     c.krk_phase = checked(phase_);
     c.sound_qty = checked(qty_);
+    c.v4 = is_checked(v4_chk_);
     main_->save_settings();
     close();
 }
@@ -254,13 +273,18 @@ LRESULT SettingsForm::handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDOK: on_ok(); return 0;
         case IDCANCEL: close(); return 0;
+        case IDC_V4:
+            if (HIWORD(wp) == BN_CLICKED) update_v4_enable();
+            return 0;
         case IDC_RESET: {  // defaults for everything but the Misc tab
-            bool kn = is_checked(kname_), vn = is_checked(vname_);
+            bool kn = is_checked(kname_), vn = is_checked(vname_), v4 = is_checked(v4_chk_);
             std::wstring vt = ui::window_text(vname_edit_);
             load(Settings());
             set_check(kname_, kn);
             set_check(vname_, vn);
             SetWindowTextW(vname_edit_, vt.c_str());
+            set_check(v4_chk_, v4);
+            update_v4_enable();
             return 0;
         }
         }

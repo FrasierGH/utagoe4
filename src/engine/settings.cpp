@@ -68,6 +68,7 @@ const Key KEYS[] = {
     {L"KrkPhase", &Settings::krk_phase, nullptr, nullptr},
     {L"SoundQty", &Settings::sound_qty, nullptr, nullptr},
     {L"Language", nullptr, nullptr, &Settings::language},
+    {L"V4Engine", nullptr, &Settings::v4, nullptr},
 };
 
 }  // namespace

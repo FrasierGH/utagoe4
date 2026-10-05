@@ -43,6 +43,8 @@ struct Lang {
     // playback / about
     const wchar_t *play_title, *about_title, *credits;
     int about_height, about_bevel, credits_x, credits_y, credits_w, credits_h, about_ok_top;
+    // Utagoe Rip 4 (Misc tab)
+    const wchar_t *v4_group, *v4_check, *v4_note;
 };
 
 extern const Lang LANG_EN;

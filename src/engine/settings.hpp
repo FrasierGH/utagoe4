@@ -39,6 +39,7 @@ struct Settings {
     bool vname_flg = true;                  // VnameFlg
     std::wstring vname_txt = L"_vo";        // VnameTxt
     std::wstring language;                  // Language (not in the original: "ja", "en" or "")
+    bool v4 = true;                         // V4Engine: Utagoe Rip 4 separation (not in the original)
 
     // derived values
     int block_ms() const { return blk_size < 50 ? 50 : blk_size; }

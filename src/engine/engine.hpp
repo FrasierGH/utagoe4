@@ -69,6 +69,7 @@ private:
     bool auto_analysis();
     void do_auto_analysis();
     Audio run_original_only();
+    Audio run_v4();  // Utagoe Rip 4 separation (v4.cpp), then the same post-processing
     Audio finish(std::vector<double> ch[2]);
 
     const Audio& orig_;

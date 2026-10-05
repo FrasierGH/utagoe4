@@ -1,5 +1,7 @@
 #include "engine.hpp"
 
+#include "v4.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -493,6 +495,7 @@ void UtagoeRip::do_auto_analysis() {
 
 Audio UtagoeRip::run() {
     if (!inst_) return run_original_only();
+    if (cfg_.v4) return run_v4();
     Audio empty;
     empty.rate = rate_, empty.channels = ch_;
     const Settings& cfg = cfg_;
@@ -691,6 +694,53 @@ Audio UtagoeRip::run_original_only() {
         }
     }
     return finish(chunks);
+}
+
+// ---------------------------------------------------------------- Utagoe Rip 4
+
+// The v4 separation aligns, matches levels and EQ and decides per bin on its own, so
+// the 3.0 analysis and its settings (intro, time shift, level, phase, processing mode,
+// waveform method, oversampling, block length) don't apply. Extractable Level and
+// Accuracy Priority do, and so does the post-processing (centralization, filters).
+Audio UtagoeRip::run_v4() {
+    auto planar = [](const Audio& a) {
+        std::vector<std::vector<double>> p(a.channels, std::vector<double>(a.frames()));
+        for (size_t i = 0; i < a.frames(); i++)
+            for (int c = 0; c < a.channels; c++) p[c][i] = a.data[i * a.channels + c] / 32768.0;
+        return p;
+    };
+    v4::Options opt;
+    opt.kvol = cfg_.kvol();
+    opt.quality = cfg_.sound_qty == QUALITY_PRIORITY;
+    v4::Report rep;
+    status(STATUS_ANALYZING);
+    bool analysing = true;
+    auto y = v4::separate(planar(orig_), planar(*inst_), rate_, opt, &rep, [&](int pct) {
+        if (analysing && pct >= 30) {
+            analysing = false;
+            status(STATUS_NONE);
+        }
+        progress(pct / 100.0);
+        return !(cb_.cancel && cb_.cancel());
+    });
+    status(STATUS_NONE);
+    if (y.empty()) {
+        cancelled_ = true;
+        Audio empty;
+        empty.rate = rate_, empty.channels = ch_;
+        return empty;
+    }
+    wchar_t line[256];
+    swprintf(line, 256, L"v4 lag:%ld sign:%d drift:%ls start:%.2f end:%.2f level:%ls gain:%.3f", rep.lag,
+             rep.sign, rep.drift_line ? L"line" : L"tracked", rep.lag_start, rep.lag_end,
+             rep.level_applied ? L"tracked" : L"fixed", rep.level_gain);
+    log(line);
+    std::vector<double> x[2];
+    for (int c = 0; c < ch_; c++) {
+        x[c].resize(y[c].size());
+        for (size_t i = 0; i < y[c].size(); i++) x[c][i] = y[c][i] * 32768.0;
+    }
+    return finish(x);
 }
 
 // ---------------------------------------------------------------- post-processing

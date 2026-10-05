@@ -87,6 +87,7 @@ private:
     void update_labels(HWND track);
     void on_ok();
     void show_page(int i);
+    void update_v4_enable();  // grey out the 3.0-only settings while v4 is on
     MainForm* main_;
     HWND tab_ = nullptr, pages_[3] = {};
     std::vector<HWND> intro_, merge_, level_, qty_, data_, phase_;
@@ -96,6 +97,7 @@ private:
     HWND lpf_chk_ = nullptr, lpf_ = nullptr, lpf_label_ = nullptr, hpf_chk_ = nullptr, hpf_ = nullptr, hpf_label_ = nullptr;
     HWND ovsp_chk_ = nullptr, ovsp_combo_ = nullptr, bsize_combo_ = nullptr;
     HWND kname_ = nullptr, vname_ = nullptr, vname_edit_ = nullptr;
+    HWND v4_chk_ = nullptr;
     int lpf_label_right_ = 0, hpf_label_right_ = 0;
 };
 
