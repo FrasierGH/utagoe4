@@ -1,21 +1,52 @@
-# 歌声りっぷ (Utagoe Rip) 4 — in development
+# 歌声りっぷ (Utagoe Rip) 4
 
-This is the development line after the faithful 3.0 rebuild (which stays as it is at
-[FrasierGH/utagoe](https://github.com/FrasierGH/utagoe)). The goal is better
-extraction, measured against 3.0 rather than judged by ear:
+The faithful 3.0 rebuild lives on, unchanged, at
+[FrasierGH/utagoe](https://github.com/FrasierGH/utagoe). This line adds a better
+separation: **Utagoe Rip 4**. It is on by default (Settings > Misc > *Improved
+extraction*); turning it off gives exactly the original's processing.
 
-1. **Per-band EQ matching**: subtract the instrumental as it was EQ'd in the album
-   master, not just at the right level. Prototyped: on mastered albums it lifts the
-   result from 1–3 dB to about 26 dB SDR (see [eval/README.md](eval/README.md)).
-2. **Time-varying, sub-sample alignment**: handle clock drift between releases.
-3. **Soft masking**: fewer "watery" artifacts than keeping or deleting whole bins.
-4. **Multi-resolution analysis**: sharper consonants and drums.
-5. **More formats**: MP3/FLAC/AAC/24-bit input, float output, mismatched rates.
-6. **High-DPI** support and workflow features (batch, A/B preview).
+3.0 subtracts the karaoke at one level, and searches small block-by-block offsets.
+v4 additionally:
 
-Ideas are prototyped in Python under `eval/`, scored there, and the winners are
-ported to the C++ engine. Until then, everything below describes the 3.0 program
-this line starts from.
+* **matches EQ differences** between the album and the karaoke release, per
+  frequency band, and **level differences over time** when their dynamics differ
+  (the album compressed and limited differently from the karaoke);
+* **aligns frame by frame, to a fraction of a sample**, following clock drift and
+  tape or vinyl speed wobble;
+* **finds the offset and polarity itself**, telling the true lag from a repeat a few
+  bars away in loop-based music.
+
+It keeps 3.0's per-bin decision rule, so where both releases really are the same
+instrumental the result is about the same.
+
+| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | v4 |
+|---|---:|---:|
+| Identical instrumental | 23.7 | 23.8 |
+| Karaoke at a different level | 23.5 | 25.3 |
+| Album EQ'd for mastering | 5.5 | 22.6 |
+| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 |
+| Both mastered, each with its own dynamics | 17.4 | 19.3 |
+| Karaoke from a different master | 7.1 | 17.8 |
+| Fractional-sample offset | 22.3 | 23.8 |
+| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 |
+| Vinyl or tape wow | 18.1 | 20.0 |
+| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 |
+
+MUSDB18-HQ test songs 11-50 (39 with a vocal in the excerpt), each release pair built
+from the song's stems; higher is better. On synthetic
+songs nothing was tuned on, the picture is the same. v4 is not better everywhere: see
+the limitations in [eval/README.md](eval/README.md#results) (one song loses 11 dB to
+wow; MP3 coding noise costs a little; v4 takes about three times as long).
+
+Everything about how this was measured, and how v4 works, is in
+[eval/README.md](eval/README.md). The separation is `src/engine/v4.cpp`; the Python
+prototype it was developed from is `eval/proto.py`, and the two give the same output
+(to -60 dB or better).
+
+**Still planned:** soft masking (fewer "watery" artifacts than keeping or deleting
+whole bins), multi-resolution analysis (sharper consonants and drums), more input
+formats (MP3/FLAC/AAC/24-bit, float output, mismatched sample rates), high-DPI
+support and workflow features (batch, A/B preview).
 
 ---
 
