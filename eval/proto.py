@@ -46,7 +46,10 @@ def _istft(Z, n):
 
 
 # ---------------------------------------------------------------- alignment
-def find_lag(mix, kar, rate, max_sec=10.0, candidates=6, sep=256, return_all=False, excerpt_sec=60.0):
+MAX_LAG_SEC = 30.0   # the karaoke may start up to this much earlier or later
+
+
+def find_lag(mix, kar, rate, max_sec=MAX_LAG_SEC, candidates=6, sep=256, return_all=False, excerpt_sec=60.0):
     """(L, sign): kar[t + L] ~ sign * mix's instrumental[t].
 
     GCC-PHAT on the mono sums gives candidate lags (the strongest |peaks|, at least
@@ -127,12 +130,17 @@ def _window_peaks(a, b, rate, m, sep, win_sec=8.0, hop_sec=4.0, windows=16, per_
     return out
 
 
+def band_hi(hz, rate):
+    """A band edge in Hz, kept below Nyquist at low sample rates."""
+    return min(hz, 0.45 * rate)
+
+
 def _bandpass(x, rate):
-    return signal.sosfilt(signal.butter(4, [100.0, 8000.0], 'band', fs=rate, output='sos'), x)
+    return signal.sosfilt(signal.butter(4, [100.0, band_hi(8000.0, rate)], 'band', fs=rate, output='sos'), x)
 
 
 def _lowpass(x, rate, hz=1000.0):
-    return signal.sosfilt(signal.butter(4, hz / (rate / 2), output='sos'), x)
+    return signal.sosfilt(signal.butter(4, band_hi(hz, rate) / (rate / 2), output='sos'), x)
 
 
 def _trial(a, k):
@@ -181,7 +189,7 @@ def track_lags(mix, kar, rate, lag0, win_sec=2.0, hop_sec=1.0, search=64, search
     stop = len(a) if stop is None else stop
     n = 1 << int(np.ceil(np.log2(2 * W)))
     f = np.fft.rfftfreq(n, 1 / rate)
-    band = (f > 100) & (f < 8000)
+    band = (f > 100) & (f < band_hi(8000.0, rate))
     om = 2 * np.pi * f[band] / rate
     starts = list(range(start, max(start + 1, stop - W + 1), H))
     i0 = 0 if seed is None else int(np.argmin([abs(x + W / 2 - seed) for x in starts]))
@@ -327,7 +335,7 @@ def refine_frames(A, B, rate, f_hi, sigma_frames=3.0, prior=0.05):
     the ones the vocal dominates (whose phase follows the vocal) hardly count, and
     frames with little instrumental fall back towards 0 (no change)."""
     f = np.arange(A.shape[1]) * rate / N
-    band = (f > 100) & (f < f_hi)
+    band = (f > 100) & (f < band_hi(f_hi, rate))
     om = 2 * np.pi * f[band] / rate
     a, b = A[:, band], B[:, band]
     X = np.sum(a * np.conj(b), axis=0)                                 # (bins, frames)
@@ -342,7 +350,7 @@ def refine_frames(A, B, rate, f_hi, sigma_frames=3.0, prior=0.05):
     return sm(conf * delta) / (sm(conf) + prior)
 
 
-def pick_tracked(mix, kar, rate, top_windows=4, excerpt_sec=60.0, same=512, max_sec=10.0):
+def pick_tracked(mix, kar, rate, top_windows=4, excerpt_sec=60.0, same=512, max_sec=MAX_LAG_SEC):
     """(lag, sign) for tracking.
 
     Candidates: the whole-file GCC-PHAT peaks (find_lag), plus the best few of the
@@ -365,7 +373,8 @@ def pick_tracked(mix, kar, rate, top_windows=4, excerpt_sec=60.0, same=512, max_
     for lag, sgn in find_lag(mix, kar, rate, return_all=True):
         if all(abs(lag - c[0]) > same for c in cands):
             cands.append((lag, sgn))
-    extra = [(lag, 1.0) for lag in _window_peaks(a, b, rate, m, 256)]
+    # the windows look for drift and nearby repeats, within +-10 s
+    extra = [(lag, 1.0) for lag in _window_peaks(a, b, rate, min(m, int(10.0 * rate)), 256)]
     extra = [c for c in _rank(_lowpass(a, rate), _lowpass(b, rate), extra)]
     added = 0
     for lag, sgn in extra:
@@ -380,16 +389,23 @@ def pick_tracked(mix, kar, rate, top_windows=4, excerpt_sec=60.0, same=512, max_
     t = np.arange(e0, e0 + E, dtype=float)
     sub = t[::256]
     mid = e0 + E // 2
-    best, best_res = None, np.inf
+    scored = []
     for c, _ in cands:
         ce, lags, w = track_lags(a, b, rate, c, start=e0, stop=e0 + E, seed=mid)
         curve, _ = fit_lag_curve(ce, lags, w, sub, rate=rate)
         k = frac_read(b[:, None], t + np.interp(t, sub, curve), half=16)[:, 0]
         res, g = _trial(ab, _bandpass(k, rate))
-        if res < best_res:
-            best_res = res
-            best = (int(round(np.interp(mid, sub, curve))), 1.0 if g >= 0 else -1.0, mid)
-    return best
+        scored.append((res, g, np.interp(mid, sub, curve)))
+    # The best trial wins; candidates within 5 % of it (a song that repeats itself, say)
+    # are told apart by how much of the two files overlaps at their lag
+    best_res = min(r for r, _, _ in scored)
+    overlap = lambda lag: max(0.0, min(n, len(b) - lag) - max(0.0, -lag))
+    win, win_ov = 0, -1.0
+    for j, (r, _, lag) in enumerate(scored):
+        if r <= best_res * 1.05 and overlap(lag) > win_ov:
+            win, win_ov = j, overlap(lag)
+    r, g, lag = scored[win]
+    return int(round(lag)), 1.0 if g >= 0 else -1.0, mid
 
 
 def align_frames(mix, kar, A, rate, lag0, seed=None, keep_line=0.75, cap=1.2):
@@ -430,7 +446,7 @@ def _eq_phase(A, B, rate, cap):
     stay visible to the refinement. Unit magnitude, (ch, bins, 1)."""
     H = _estimate_h(A, B, 1.0, cap, 1 / 3, 1, 'regress')
     f = np.arange(H.shape[1]) * rate / N
-    band = (f > 100) & (f < 6000)
+    band = (f > 100) & (f < band_hi(6000.0, rate))
     om = 2 * np.pi * f[band] / rate
     w = np.sum(np.abs(B[:, band]) ** 2, axis=2)
     tau = -np.sum(w * om * np.angle(H[:, band]), axis=1) / np.sum(w * om * om, axis=1)
@@ -531,9 +547,11 @@ def _level_gain(A, I, cap, c):
     cells the instrumental dominates (1 - after / before)."""
     a, i = A[:, 1::2], I[:, 1::2]
     w = np.abs(i) * cap > np.abs(a)
-    pa = np.sum(np.where(w, np.abs(a) ** 2, 0), axis=1)                 # (ch, frames)
-    x = np.sum(np.where(w, np.real(a * np.conj(i)), 0), axis=1)
-    ii = np.sum(np.where(w, np.abs(i) ** 2, 0), axis=1)
+    e = slice(N // HOP // 2, -(N // HOP // 2))     # not the frames reaching past an end
+    pa = np.sum(np.where(w, np.abs(a) ** 2, 0), axis=1)[:, e]          # (ch, frames)
+    x = np.sum(np.where(w, np.real(a * np.conj(i)), 0), axis=1)[:, e]
+    ii = np.sum(np.where(w, np.abs(i) ** 2, 0), axis=1)[:, e]
+    c = c[:, e]
     r0 = np.sum(pa - 2 * x + ii)
     r1 = np.sum(pa - 2 * c * x + c * c * ii)
     return 1 - r1 / r0 if r0 > 1e-30 else 0.0      # nothing to correct in silence
@@ -557,6 +575,9 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
              octave=1 / 3, passes=2, mag='power', align='global', lvl_gain=0.13):
     """Returns the vocal estimate (same shape as mix)."""
     n = len(mix)
+    if n == 0 or len(kar) == 0:                                   # nothing to align
+        return mix.copy()
+    kar = kar[:n + int(MAX_LAG_SEC * rate) + N]                  # beyond the lag search
     seed = None
     if align == 'track':
         lag0, sign, seed = pick_tracked(mix, kar, rate)

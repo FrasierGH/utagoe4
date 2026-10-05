@@ -1,6 +1,7 @@
 // Utagoe Rip 4 separation. Follows eval/proto.py (engine `v4`) step by step; where the
-// prototype holds whole spectrograms, this streams STFT frames in several passes, so
-// memory stays small for full-length songs.
+// prototype holds whole spectrograms, this streams STFT frames in several passes. What
+// stays in memory is a few full-length copies of the signals (about 2.5 GB at the peak
+// for a 10-minute stereo song, the caller's copies included).
 #include "v4.hpp"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <complex>
 #include <cstdlib>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -28,6 +30,10 @@ const double PI = 3.14159265358979323846;
 const size_t N = 8192;          // STFT (as 3.0's ThVocalFFT)
 const size_t HOPV = 1024;
 const size_t NB = N / 2 + 1;    // one-sided bins
+const double MAX_LAG_SEC = 30.0;  // the karaoke may start up to this much earlier or later
+
+// a band edge in Hz, kept below Nyquist at low sample rates
+double band_hi(double hz, double rate) { return std::min(hz, 0.45 * rate); }
 
 // fn(i, chunk) for i in [0, count), split into `chunks` contiguous runs on as many threads.
 // Sums kept per chunk and added in chunk order give the same result on every machine.
@@ -39,12 +45,21 @@ void parallel_for(size_t count, size_t chunks, Fn fn) {
         for (size_t i = 0; i < count; i++) fn(i, (size_t)0);
         return;
     }
+    // an exception (bad_alloc) must not escape a thread (std::terminate): the first one
+    // is rethrown here, on the caller's thread
+    std::vector<std::exception_ptr> err(chunks);
     std::vector<std::thread> th;
     for (size_t t = 0; t < chunks; t++)
         th.emplace_back([&, t] {
-            for (size_t i = count * t / chunks; i < count * (t + 1) / chunks; i++) fn(i, t);
+            try {
+                for (size_t i = count * t / chunks; i < count * (t + 1) / chunks; i++) fn(i, t);
+            } catch (...) {
+                err[t] = std::current_exception();
+            }
         });
     for (auto& x : th) x.join();
+    for (auto& e : err)
+        if (e) std::rethrow_exception(e);
 }
 
 size_t next_pow2(size_t n) {
@@ -189,7 +204,7 @@ std::vector<double> bandpass(const std::vector<double>& x, double rate) {
     {
         std::lock_guard<std::mutex> hold(lock);
         auto it = cache.find(rate);
-        if (it == cache.end()) it = cache.emplace(rate, butter4_bandpass(100.0, 8000.0, rate)).first;
+        if (it == cache.end()) it = cache.emplace(rate, butter4_bandpass(100.0, band_hi(8000.0, rate), rate)).first;
         sos = it->second;
     }
     return sosfilt(sos, x);
@@ -202,7 +217,7 @@ std::vector<double> lowpass(const std::vector<double>& x, double rate) {
     {
         std::lock_guard<std::mutex> hold(lock);
         auto it = cache.find(rate);
-        if (it == cache.end()) it = cache.emplace(rate, butter4_lowpass(1000.0, rate)).first;
+        if (it == cache.end()) it = cache.emplace(rate, butter4_lowpass(band_hi(1000.0, rate), rate)).first;
         sos = it->second;
     }
     return sosfilt(sos, x);
@@ -368,7 +383,7 @@ Track track_lags(const std::vector<double>& a, const std::vector<double>& b, dou
         double num = 0, den = 0;
         for (size_t k = 0; k <= n / 2; k++) {
             double fhz = (double)k * rate / (double)n;
-            if (!(fhz > 100 && fhz < 8000)) continue;
+            if (!(fhz > 100 && fhz < band_hi(8000.0, rate))) continue;
             double om = 2 * PI * fhz / rate;
             cplx y = pol * X[k] * std::exp(cplx(0, 2 * PI * fhz * (double)d / rate));
             double w = std::abs(y), ph = std::arg(y);
@@ -509,7 +524,7 @@ std::vector<long long> window_peaks(const std::vector<double>& a, const std::vec
     size_t n = next_pow2(W + W + 2 * (size_t)m);
     FFT f(n);
     std::vector<std::vector<long long>> found(count);
-    parallel_for(count, count, [&](size_t i, size_t) {
+    parallel_for(count, std::min<size_t>(count, 4), [&](size_t i, size_t) {  // ~100 MB each
         size_t w0 = count > 1 ? (size_t)((double)i * (double)(a.size() - W) / (double)(count - 1)) : 0;
         std::vector<double> sa(a.begin() + (long long)w0, a.begin() + (long long)(w0 + W));
         std::vector<double> sb = segment(b, (long long)w0 - m, W + 2 * (size_t)m);
@@ -535,7 +550,7 @@ std::vector<long long> window_peaks(const std::vector<double>& a, const std::vec
 
 // global lag candidates, best trial subtraction first (proto.find_lag)
 std::vector<Cand> find_lags(const std::vector<double>& a, const std::vector<double>& b, double rate,
-                            double max_sec = 10.0, size_t candidates = 6, long long sep = 256, double excerpt_sec = 60.0) {
+                            double max_sec = MAX_LAG_SEC, size_t candidates = 6, long long sep = 256, double excerpt_sec = 60.0) {
     long long m = (long long)(max_sec * rate);
     size_t E = (size_t)(excerpt_sec * rate);
     std::vector<long long> lags;
@@ -593,7 +608,7 @@ struct Pick {
 };
 
 Pick pick_tracked(const std::vector<double>& a, const std::vector<double>& b, double rate, size_t top_windows = 4,
-                  double excerpt_sec = 60.0, long long same = 512, double max_sec = 10.0) {
+                  double excerpt_sec = 60.0, long long same = 512, double max_sec = MAX_LAG_SEC) {
     size_t n = a.size();
     long long m = (long long)(max_sec * rate);
     std::vector<Cand> cands;
@@ -604,18 +619,21 @@ Pick pick_tracked(const std::vector<double>& a, const std::vector<double>& b, do
         return true;
     };
     for (const Cand& c : find_lags(a, b, rate)) add(c);
-    std::vector<Cand> extra = rank(lowpass(a, rate), lowpass(b, rate), window_peaks(a, b, rate, m, 256));
+    // the windows look for drift and nearby repeats, within +-10 s
+    long long mw = std::min(m, (long long)(10.0 * rate));
+    std::vector<Cand> extra = rank(lowpass(a, rate), lowpass(b, rate), window_peaks(a, b, rate, mw, 256));
     size_t added = 0;
     for (const Cand& c : extra) {
         if (added == top_windows) break;
         if (add(c)) added++;
     }
     size_t E = std::min(n, (size_t)(excerpt_sec * rate)), e0 = (n - E) / 2, mid = e0 + E / 2;
+    if (cands.empty()) return {0, 1, mid};
     std::vector<double> ab = bandpass(std::vector<double>(a.begin() + (long long)e0, a.begin() + (long long)(e0 + E)), rate);
     std::vector<double> sub;
     for (size_t t = e0; t < e0 + E; t += 256) sub.push_back((double)t);
     std::vector<double> res(cands.size()), gain(cands.size()), lag_mid(cands.size());
-    parallel_for(cands.size(), cands.size(), [&](size_t j, size_t) {
+    parallel_for(cands.size(), std::min<size_t>(cands.size(), 6), [&](size_t j, size_t) {
         Track tr = track_lags(a, b, rate, cands[j].lag, 2.0, 1.0, 64, 512, e0, e0 + E, (long long)mid);
         std::vector<double> curve;
         fit_lag_curve(tr, sub, rate, &curve);
@@ -625,14 +643,18 @@ Pick pick_tracked(const std::vector<double>& a, const std::vector<double>& b, do
         std::tie(res[j], gain[j]) = trial(ab, k);
         lag_mid[j] = interp1((double)mid, sub, curve);
     });
-    Pick best{cands.front().lag, 1, mid};
-    double best_res = INFINITY;
+    // The best trial wins; candidates within 5 % of it (a song that repeats itself, say)
+    // are told apart by how much of the two files overlaps at their lag
+    double best_res = *std::min_element(res.begin(), res.end());
+    auto overlap = [&](double lag) {
+        double lo = std::max(0.0, -lag), hi = std::min((double)n, (double)b.size() - lag);
+        return std::max(0.0, hi - lo);
+    };
+    size_t win = 0;
+    double win_ov = -1;
     for (size_t j = 0; j < cands.size(); j++)
-        if (res[j] < best_res) {
-            best_res = res[j];
-            best = {(long long)std::nearbyint(lag_mid[j]), gain[j] >= 0 ? 1 : -1, mid};
-        }
-    return best;
+        if (res[j] <= best_res * 1.05 && overlap(lag_mid[j]) > win_ov) win = j, win_ov = overlap(lag_mid[j]);
+    return {(long long)std::nearbyint(lag_mid[win]), gain[win] >= 0 ? 1 : -1, mid};
 }
 
 // ---------------------------------------------------------------- STFT frames
@@ -705,13 +727,22 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     const double rate = (double)rate_i;
     const size_t n = mix_in[0].size(), C = mix_in.size();
     Report rep;
+    if (n == 0 || kar_in[0].empty()) {  // nothing to align: the mix as it is
+        if (report) *report = rep;
+        return mix_in;
+    }
+
+    // Only the karaoke up to MAX_LAG_SEC past the mix's end can line up with it (the
+    // lag search covers +-MAX_LAG_SEC), so a much longer one is trimmed
+    size_t kn = std::min(kar_in[0].size(), n + (size_t)(MAX_LAG_SEC * rate) + N);
+    Planar kar(C);
+    for (size_t c = 0; c < C; c++) kar[c].assign(kar_in[c].begin(), kar_in[c].begin() + (long long)kn);
 
     // --- global lag and polarity, from the best tracked candidate
-    std::vector<double> am = mono(mix_in), bm = mono(kar_in);
+    std::vector<double> am = mono(mix_in), bm = mono(kar);
     Pick c0 = pick_tracked(am, bm, rate);
     rep.lag = (long)c0.lag;
     rep.sign = c0.sign;
-    Planar kar = kar_in;
     for (auto& ch : kar)
         for (double& v : ch) v *= c0.sign;
     for (double& v : bm) v *= c0.sign;
@@ -767,7 +798,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
             for (size_t b = 0; b < NB; b++) {
                 H0[c][b] = sn[b] / (sd[b].real() + 1e-20);
                 double fhz = (double)b * rate / (double)N;
-                if (!(fhz > 100 && fhz < 6000)) continue;
+                if (!(fhz > 100 && fhz < band_hi(6000.0, rate))) continue;
                 double om = 2 * PI * fhz / rate, w = dc[b].real();
                 num += w * om * std::arg(H0[c][b]);
                 den += w * om * om;
@@ -815,7 +846,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     // can pass for a straight line, so the first refinement always runs; the line is
     // kept when that finds nothing (median correction under 0.75 samples)
     eq_phase();
-    std::vector<double> d1 = refine(2000.0);
+    std::vector<double> d1 = refine(band_hi(2000.0, rate));
     if (!step(38)) return {};
     std::vector<double> inner = F > 100 ? std::vector<double>(d1.begin() + 40, d1.end() - 40) : d1;
     for (double& v : inner) v = std::fabs(v);
@@ -823,12 +854,14 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
         rep.drift_line = false;
         for (size_t k = 0; k < F; k++) lag[k] += d1[k];
         eq_phase();  // re-estimated once the first pass has taken out most of a wobble
-        std::vector<double> d2 = refine(6000.0);
+        std::vector<double> d2 = refine(band_hi(6000.0, rate));
         for (size_t k = 0; k < F; k++) lag[k] += d2[k];
         if (!step(46)) return {};
     }
     rep.lag_start = lag.front();
     rep.lag_end = lag.back();
+    std::vector<double>().swap(am);  // the mono sums were for the alignment only
+    std::vector<double>().swap(bm);
 
     // Frames are cut from the karaoke at one lag each (proto._stft_along): exact while
     // the lag holds still over a frame. When it moves by more than 0.6 samples across one
@@ -845,6 +878,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
         std::vector<double> pos(n);
         for (size_t t = 0; t < n; t++) pos[t] = (double)t + interp1((double)t, centres, lag);
         for (const auto& ch : kar) kres.push_back(frac_read(ch, pos, 64, 10.0, CHUNKS));
+        Planar().swap(kar);  // only the resampled karaoke is read from here on
     }
     auto frame_kar = [&](size_t k, std::vector<CVec>* B) {
         if (rep.resampled)
@@ -921,6 +955,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
             for (auto& ch : x) std::fill(ch.begin(), ch.end(), 1.0);
         Curves c0[2] = {zeros(), zeros()}, c1[2] = {zeros(), zeros()};
         Curves oa = zeros(), ox = zeros(), oi = zeros();
+        const size_t EDGE = N / HOPV / 2;  // frames reaching past an end of the mix
         for (int step = 0; step < 3; step++) {
             Curves nu[2] = {zeros(), zeros()}, de[2] = {zeros(), zeros()};
             parallel_for(F, CHUNKS, [&](size_t k, size_t) {
@@ -931,7 +966,8 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                     for (size_t b = 0; b < NB; b++) {
                         cplx I = H[c][b] * B[c][b];
                         double aa = std::norm(A[c][b]);
-                        if (step == 0 && b % 2 == 1 && std::abs(I) * cap > std::abs(A[c][b])) {
+                        if (step == 0 && b % 2 == 1 && k >= EDGE && k + EDGE < F &&
+                            std::abs(I) * cap > std::abs(A[c][b])) {
                             double x = (A[c][b] * std::conj(I)).real();
                             oa[c][k] += aa, ox[c][k] += x, oi[c][k] += std::norm(I);
                         }
@@ -1027,15 +1063,17 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
         }
         if (!step(78 + (int)(20 * (k0 + cnt) / F))) return {};
     }
-    Planar out(C, std::vector<double>(n));
-    for (size_t c = 0; c < C; c++)
+    for (size_t c = 0; c < C; c++) {  // the output, in place of the overlap-add buffer
         for (size_t t = 0; t < n; t++) {
             size_t e = t + N / 2;
-            out[c][t] = acc[c][e] / (norm[e] > 1e-10 ? norm[e] : 1.0);
+            acc[c][t] = acc[c][e] / (norm[e] > 1e-10 ? norm[e] : 1.0);
         }
+        acc[c].resize(n);
+        acc[c].shrink_to_fit();
+    }
     if (report) *report = rep;
     step(100);
-    return out;
+    return acc;
 }
 
 }  // namespace v4

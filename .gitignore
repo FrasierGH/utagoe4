@@ -3,8 +3,14 @@ original/
 *.exe
 *.lzh
 
-# audio
+# audio, and datasets (MUSDB18 is for non-commercial use: never commit it)
 *.wav
+*.flac
+*.mp3
+*.mp4
+*.zip
+*.npy
+*.npz
 
 # build output
 build/

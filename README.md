@@ -3,7 +3,8 @@
 The faithful 3.0 rebuild lives on, unchanged, at
 [FrasierGH/utagoe](https://github.com/FrasierGH/utagoe). This line adds a better
 separation: **Utagoe Rip 4**. It is on by default (Settings > Misc > *Improved
-extraction*); turning it off gives exactly the original's processing.
+extraction*); turning it off gives exactly the original's processing, as do files
+shorter than 8 seconds.
 
 3.0 subtracts the karaoke at one level, and searches small block-by-block offsets.
 v4 additionally:
@@ -13,8 +14,8 @@ v4 additionally:
   (the album compressed and limited differently from the karaoke);
 * **aligns frame by frame, to a fraction of a sample**, following clock drift and
   tape or vinyl speed wobble;
-* **finds the offset and polarity itself**, telling the true lag from a repeat a few
-  bars away in loop-based music.
+* **finds the offset (up to 30 s either way) and polarity itself**, telling the true
+  lag from a repeat a few bars away in loop-based music.
 
 It keeps 3.0's per-bin decision rule, so where both releases really are the same
 instrumental the result is about the same.
@@ -82,7 +83,8 @@ reconstructed from a disassembly of the original:
 Utagoe Rip 4 has no release yet: build it yourself (see below). The 3.0 rebuild
 is released at [FrasierGH/utagoe](https://github.com/FrasierGH/utagoe/releases).
 Settings are kept in `%LOCALAPPDATA%\UtagoeRip\utagoe.ini`, shared with 3.0
-(Utagoe Rip 4 adds one key, `V4Engine`).
+(Utagoe Rip 4 adds one key, `V4Engine`; saving settings in the 3.0 rebuild drops it,
+which turns Utagoe Rip 4's separation back on).
 
 Releases are built by GitHub Actions from the tagged source
 (`.github/workflows/build.yml`). A release lists the exe's SHA-256, and the

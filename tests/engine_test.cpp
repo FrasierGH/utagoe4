@@ -36,8 +36,7 @@ struct Song {
     std::vector<int16_t> vocal;  // mono
 };
 
-Song make_song(double seconds, int lead_in, bool lead_in_orig = false) {
-    const int rate = 44100;
+Song make_song(double seconds, int lead_in, bool lead_in_orig = false, int rate = 44100) {
     const double PI = 3.14159265358979323846;
     size_t n = (size_t)(seconds * rate);
     std::vector<double> il(n), ir(n), voc(n);
@@ -245,6 +244,15 @@ int self_test() {
         std::printf("        drift 300 ppm: v4 SNR %.1f dB, 3.0 %.1f dB\n", xd, x30);
         expect(logged(rd, L"(resampled)"), "v4: drifting instrumental resampled");
         expect(xd > 20 && xd > x30, "v4: drifting instrumental extracted");
+        Song late = make_song(16.0, 529200);  // the karaoke starts 12 s later
+        Run rf = run(late, v);
+        expect(logged(rf, L"v4 lag:529200 sign:1"), "v4: offset over 10 s found");
+        Song low = make_song(10.0, 1234, false, 8000);  // 8 kHz: band edges below Nyquist
+        Run rlow = run(low, v);
+        expect(logged(rlow, L"v4 lag:1234 sign:1") && snr(rlow.out, low.vocal) > 20, "v4: 8 kHz file");
+        Song brief = make_song(5.0, 100);
+        Run rb = run(brief, v);
+        expect(logged(rb, L"under 8 s") && snr(rb.out, brief.vocal) > 20, "v4: under 8 s, 3.0's processing");
         v.cntr_flag = v.lpf_flag = v.hpf_flag = true;
         expect(run(s, v).out.frames() == s.orig.frames(), "v4: filters + centralization");
     }

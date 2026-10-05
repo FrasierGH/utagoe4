@@ -226,13 +226,17 @@ def bootstrap_ci(d, n=4000, seed=0):
 def summarize(rows, scenarios, engines, metric, ref):
     lower = metric == 'leak'
     rows = [r for r in rows if np.isfinite(r[metric])]      # e.g. leak needs a pause in the vocal
-    print(f'\n{metric} (dB, mean over {len({r["song"] for r in rows})} songs; {"lower" if lower else "higher"} is better)\n')
+    print(f'\n{metric} (dB, mean over the songs every engine has, {len({r["song"] for r in rows})} in all; '
+          f'{"lower" if lower else "higher"} is better)\n')
     print('| scenario | ' + ' | '.join(engines) + ' |')
     print('|---|' + '---:|' * len(engines))
     for sc in scenarios:
+        # every engine averaged over the same songs: those all of them have a score for
+        have = [{r['song'] for r in rows if r['scenario'] == sc and r['engine'] == en} for en in engines]
+        common = set.intersection(*[h for h in have if h]) if any(have) else set()
         cells = []
         for en in engines:
-            v = [r[metric] for r in rows if r['scenario'] == sc and r['engine'] == en]
+            v = [r[metric] for r in rows if r['scenario'] == sc and r['engine'] == en and r['song'] in common]
             cells.append(f'{np.mean(v):.2f}' if v else '')
         print(f'| {sc} | ' + ' | '.join(cells) + ' |')
     if ref not in engines:
@@ -278,14 +282,22 @@ def main():
     tag = 'stems' if args.stems else 'synth'
     keys = ('median_sdr', 'sdr', 'si_sdr', 'leak')
     if args.report:
-        latest = {}           # newest file wins for every (song, scenario, engine)
+        # only rows made by the current code of each engine; among those, the newest file
+        # wins for every (song, scenario, engine)
+        current = {en: engine_version(en) for en in engines}
+        latest, stale = {}, 0
         base = os.path.join(WORK, f'results_{tag}_{args.set}{_length_tag(args)}')
         paths = glob.glob(base + '.csv') + glob.glob(base + '_shard*.csv')
         for path in sorted(paths, key=os.path.getmtime):
             with open(path, newline='') as f:
                 for r in csv.DictReader(f):
                     if r['engine'] in engines and r['scenario'] in scenarios:
+                        if r.get('version') != current[r['engine']]:
+                            stale += 1
+                            continue
                         latest[(r['song'], r['scenario'], r['engine'])] = {**r, **{k: float(r[k]) for k in keys}}
+        if stale:
+            print(f'note: {stale} saved rows from other code versions ignored')
         summarize(list(latest.values()), scenarios, engines, args.metric, args.ref)
         return
     case_ver = _hash(_src('degrade.py'), _src('synth.py'), args.seconds, args.start, tag)
@@ -310,7 +322,7 @@ def main():
                 scores = score_case(en, case, target, mix, out, args.keep_audio)
                 if scores is None:
                     continue
-                r = dict(song=song, scenario=sc, engine=en, **scores)
+                r = dict(song=song, scenario=sc, engine=en, version=versions[en], **scores)
                 nan += sum(1 for k in ('median_sdr', 'sdr', 'si_sdr', 'leak') if not np.isfinite(r[k]))
                 rows.append(r)
                 if not args.quiet:

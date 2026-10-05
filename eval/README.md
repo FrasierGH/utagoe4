@@ -85,8 +85,8 @@ All ignore the first and last second (start-up and tail effects in every engine)
   (3000-3002) were later looked at to find out why v4 lost on fast drift, which led to
   resampling the karaoke (the threshold was then chosen on dev songs).
 * **final**: synthetic seeds 4000-4019, added last, for the final numbers. Nothing was
-  tuned on them; only their summary table was looked at (once before the last two
-  fixes, which came from MUSDB songs, and once after).
+  tuned on them; only their summary table was looked at, after each of the last four
+  rounds of fixes (which came from MUSDB songs and from a code review).
 
 ## Engines
 
@@ -107,14 +107,18 @@ All ignore the first and last second (start-up and tail effects in every engine)
 ## How v4 works
 
 **Lag and polarity.** Candidates are the strongest GCC-PHAT peaks of the whole file
-(searched within +-10 s; songs over a minute use a one-minute excerpt from the
-middle), plus the best peaks of 8 s windows spread over the song: drift smears the
-whole-file peak and loop-based music adds rival peaks a few bars away, but the true
-lag tends to win in some windows. Lags within 512 samples count as one. Each
-candidate is tracked through a one-minute excerpt (as below, ignoring polarity) and
-scored by a trial subtraction in the 100 Hz-8 kHz band along its own curve, where
-repeats differ more than they do below 1 kHz. The winner gives the lag and, from the
-sign of its trial gain, the polarity.
+(searched within +-30 s; songs over a minute use a one-minute excerpt from the
+middle), plus the best peaks of 8 s windows spread over the song (within +-10 s):
+drift smears the whole-file peak and loop-based music adds rival peaks a few bars
+away, but the true lag tends to win in some windows. Lags within 512 samples count as
+one. Each candidate is tracked through a one-minute excerpt (as below, ignoring
+polarity) and scored by a trial subtraction in the 100 Hz-8 kHz band along its own
+curve, where repeats differ more than they do below 1 kHz. The winner gives the lag
+and, from the sign of its trial gain, the polarity; candidates within 5 % of the best
+score (a song that repeats itself) are told apart by how much of the two files
+overlaps at their lag. Files under 8 s are processed as 3.0 does (in the program, not
+in `v4_cli`): below that the estimates have too little to go on. Band edges stay
+below Nyquist at low sample rates.
 
 **Tracking.** Windows of 2 s every 1 s, starting where the lag was measured and
 working outwards; each searches around the previous confident estimate, so drift is
@@ -198,18 +202,18 @@ is the same difference for leak (positive: v4 leaks less).
 
 | Scenario | 3.0 | v4 | v4 − 3.0 [95 % CI] | v4 better | leak, v4 better by |
 |---|---:|---:|---:|---:|---:|
-| `clean` | 27.99 | 28.05 | +0.06 [-0.01, +0.15] | 14/20 | +0.18 [+0.10, +0.27] |
-| `level` | 27.74 | 29.61 | +1.86 [+1.67, +2.02] | 20/20 | +0.60 [+0.16, +0.96] |
-| `inverted` | 27.97 | 28.04 | +0.07 [-0.00, +0.16] | 14/20 | +0.25 [+0.15, +0.35] |
-| `album_eq` | 3.76 | 26.58 | +22.82 [+22.16, +23.46] | 20/20 | +36.17 [+34.89, +37.54] |
-| `album_loud` | -3.32 | 9.47 | +12.79 [+11.61, +13.86] | 20/20 | +12.20 [+10.94, +13.39] |
-| `both_loud` | 22.40 | 23.32 | +0.92 [+0.68, +1.18] | 19/20 | -1.01 [-2.45, +0.20] |
-| `both_diff` | 8.02 | 22.89 | +14.86 [+14.26, +15.46] | 20/20 | +13.65 [+12.74, +14.69] |
-| `offset_frac` | 26.32 | 28.04 | +1.72 [+1.43, +2.03] | 20/20 | +1.33 [+0.73, +1.99] |
-| `drift` | 26.60 | 28.04 | +1.44 [+1.15, +1.75] | 20/20 | +2.78 [+2.14, +3.56] |
-| `drift_fast` | 20.06 | 27.19 | +7.13 [+6.71, +7.55] | 20/20 | +11.90 [+11.19, +12.61] |
-| `wow` | 18.33 | 25.14 | +6.81 [+6.36, +7.23] | 20/20 | +9.57 [+8.92, +10.30] |
-| `mp3` | 20.11 | 19.64 | -0.47 [-0.53, -0.41] | 0/20 | -1.79 [-1.91, -1.67] |
+| `clean` | 27.99 | 28.05 | +0.06 [-0.02, +0.15] | 14/20 | +0.18 [+0.10, +0.27] |
+| `level` | 27.74 | 29.61 | +1.86 [+1.68, +2.02] | 20/20 | +0.60 [+0.15, +0.94] |
+| `inverted` | 27.97 | 28.04 | +0.07 [-0.01, +0.16] | 14/20 | +0.25 [+0.15, +0.36] |
+| `album_eq` | 3.76 | 26.58 | +22.82 [+22.13, +23.43] | 20/20 | +36.17 [+34.93, +37.56] |
+| `album_loud` | -3.32 | 9.47 | +12.79 [+11.58, +13.88] | 20/20 | +12.20 [+10.91, +13.42] |
+| `both_loud` | 22.40 | 23.32 | +0.92 [+0.67, +1.19] | 19/20 | -1.01 [-2.46, +0.23] |
+| `both_diff` | 8.02 | 22.89 | +14.86 [+14.31, +15.45] | 20/20 | +13.65 [+12.74, +14.74] |
+| `offset_frac` | 26.32 | 28.04 | +1.72 [+1.43, +2.02] | 20/20 | +1.33 [+0.74, +2.02] |
+| `drift` | 26.60 | 28.04 | +1.44 [+1.16, +1.77] | 20/20 | +2.78 [+2.13, +3.55] |
+| `drift_fast` | 20.06 | 27.19 | +7.13 [+6.70, +7.55] | 20/20 | +11.90 [+11.16, +12.59] |
+| `wow` | 18.33 | 25.14 | +6.81 [+6.37, +7.23] | 20/20 | +9.57 [+8.92, +10.30] |
+| `mp3` | 20.11 | 19.64 | -0.47 [-0.54, -0.41] | 0/20 | -1.79 [-1.91, -1.67] |
 | `everything` | 6.87 | 15.62 | +8.75 [+8.47, +9.03] | 20/20 | +10.07 [+9.74, +10.40] |
 
 The `fresh` songs give the same picture (every row within 0.7 dB of these).
@@ -218,19 +222,19 @@ The `fresh` songs give the same picture (every row within 0.7 dB of these).
 
 | Scenario | 3.0 | v4 | v4 − 3.0 [95 % CI] | v4 better | leak, v4 better by |
 |---|---:|---:|---:|---:|---:|
-| `clean` | 23.67 | 23.78 | +0.11 [-0.10, +0.33] | 25/39 | +0.14 [+0.03, +0.25] |
-| `level` | 23.51 | 25.30 | +1.79 [+1.52, +2.06] | 37/39 | +1.22 [+0.64, +2.10] |
-| `inverted` | 23.67 | 23.78 | +0.11 [-0.09, +0.33] | 26/39 | +0.42 [+0.13, +0.92] |
-| `album_eq` | 5.45 | 22.62 | +17.18 [+16.20, +18.12] | 39/39 | +38.74 [+36.44, +40.92] |
-| `album_loud` | -4.37 | 11.65 | +16.03 [+14.87, +17.16] | 39/39 | +17.29 [+15.47, +19.13] |
-| `both_loud` | 17.39 | 19.25 | +1.86 [+1.00, +3.09] | 35/39 | +0.28 [-1.73, +2.65] |
-| `both_diff` | 7.09 | 17.76 | +10.67 [+9.82, +11.45] | 39/39 | +17.12 [+15.19, +19.07] |
-| `offset_frac` | 22.26 | 23.75 | +1.49 [+0.81, +2.62] | 37/39 | +0.32 [-0.89, +1.68] |
-| `drift` | 22.47 | 23.76 | +1.29 [+0.74, +2.18] | 37/39 | +9.19 [+6.93, +11.56] |
-| `drift_fast` | 19.13 | 23.22 | +4.09 [+3.59, +4.59] | 39/39 | +19.35 [+16.64, +21.95] |
-| `wow` | 18.08 | 19.96 | +1.88 [+0.72, +2.86] | 30/39 | +9.05 [+6.01, +11.92] |
-| `mp3` | 19.54 | 19.45 | -0.10 [-0.18, -0.01] | 12/39 | -1.36 [-1.77, -0.92] |
-| `everything` | 6.19 | 14.81 | +8.62 [+7.78, +9.42] | 39/39 | +13.01 [+11.90, +14.19] |
+| `clean` | 23.67 | 23.78 | +0.11 [-0.10, +0.32] | 25/39 | +0.14 [+0.03, +0.25] |
+| `level` | 23.51 | 25.30 | +1.79 [+1.53, +2.07] | 37/39 | +1.22 [+0.64, +2.07] |
+| `inverted` | 23.67 | 23.78 | +0.11 [-0.09, +0.32] | 26/39 | +0.42 [+0.13, +0.90] |
+| `album_eq` | 5.45 | 22.62 | +17.18 [+16.18, +18.17] | 39/39 | +38.74 [+36.50, +41.05] |
+| `album_loud` | -4.37 | 11.65 | +16.03 [+14.83, +17.12] | 39/39 | +17.29 [+15.41, +19.07] |
+| `both_loud` | 17.39 | 19.25 | +1.86 [+0.96, +3.16] | 35/39 | +0.28 [-1.74, +2.58] |
+| `both_diff` | 7.09 | 17.76 | +10.67 [+9.87, +11.46] | 39/39 | +17.12 [+15.25, +19.05] |
+| `offset_frac` | 22.26 | 23.75 | +1.49 [+0.81, +2.60] | 37/39 | +0.32 [-0.89, +1.71] |
+| `drift` | 22.47 | 23.76 | +1.29 [+0.73, +2.18] | 37/39 | +9.19 [+6.96, +11.57] |
+| `drift_fast` | 19.13 | 23.22 | +4.09 [+3.59, +4.58] | 39/39 | +19.35 [+16.57, +22.05] |
+| `wow` | 18.08 | 19.96 | +1.88 [+0.80, +2.85] | 30/39 | +9.05 [+6.18, +12.02] |
+| `mp3` | 19.54 | 19.45 | -0.10 [-0.18, -0.02] | 12/39 | -1.36 [-1.76, -0.93] |
+| `everything` | 6.19 | 14.81 | +8.62 [+7.83, +9.45] | 39/39 | +13.01 [+11.94, +14.18] |
 
 Songs 11-50 are 40 songs; *Skelpolu - Resurrection* has no vocal in its excerpt, so its
 median SDR is undefined (it still counts for leak, where 36 songs have pauses).

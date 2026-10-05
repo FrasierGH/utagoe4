@@ -495,7 +495,12 @@ void UtagoeRip::do_auto_analysis() {
 
 Audio UtagoeRip::run() {
     if (!inst_) return run_original_only();
-    if (cfg_.v4) return run_v4();
+    if (cfg_.v4) {
+        // below 8 s the lag and drift estimates have too little to go on, and 3.0's
+        // processing does better
+        if (orig_.frames() >= 8 * (size_t)rate_) return run_v4();
+        log(L"v4: under 8 s, original processing");
+    }
     Audio empty;
     empty.rate = rate_, empty.channels = ch_;
     const Settings& cfg = cfg_;
