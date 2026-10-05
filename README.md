@@ -48,21 +48,21 @@ reconstructed from a disassembly of the original:
 
 ## Download
 
-Get `utagoe.exe` from the [Releases](../../releases) page and run it. Settings
-are kept in `%LOCALAPPDATA%\UtagoeRip\utagoe.ini`.
+Utagoe Rip 4 has no release yet: build it yourself (see below). The 3.0 rebuild
+is released at [FrasierGH/utagoe](https://github.com/FrasierGH/utagoe/releases).
+Settings are kept in `%LOCALAPPDATA%\UtagoeRip\utagoe.ini`, shared with 3.0
+(Utagoe Rip 4 adds one key, `V4Engine`).
 
-Every release is built by GitHub Actions from the tagged source
-(`.github/workflows/build.yml`). The release lists the exe's SHA-256, and the
+Releases are built by GitHub Actions from the tagged source
+(`.github/workflows/build.yml`). A release lists the exe's SHA-256, and the
 build is signed with a GitHub [build provenance
 attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
 To check that a download came from this repository's source, use the
 [GitHub CLI](https://cli.github.com/):
 
 ```bash
-gh attestation verify utagoe.exe --repo FrasierGH/utagoe
+gh attestation verify utagoe.exe --repo FrasierGH/utagoe4
 ```
-
-You can also build it yourself (see below).
 
 ## Using it
 
@@ -98,6 +98,8 @@ You can also build it yourself (see below).
 * Processing runs in a background thread, so the window stays responsive.
 * Double instead of single precision in a few places, so results can differ
   from the original's in the least significant bit.
+* **Utagoe Rip 4 separation** (see the top of this page), on by default. Turned
+  off, the processing is the original's.
 
 ## Building
 
@@ -127,30 +129,35 @@ The program is `build/utagoe.exe`.
 
 `ctest` runs `engine_test`, which builds a synthetic song (a known "vocal"
 over an instrumental, with an offset instrumental file) and checks that every
-mode recovers the vocal. It also covers the offset search, inverted phase,
+mode recovers the vocal, with 3.0's processing and with Utagoe Rip 4's (including
+an inverted and a drifting instrumental). It also covers the offset search,
 the settings and the INI format. `engine_test ORIGINAL INSTRUMENTAL OUTPUT
-[Key=Value ...]` processes files from the command line and prints the
-analysis log.
+[Key=Value ...]` processes files from the command line with 3.0's processing
+(`V4Engine=1` for v4) and prints the analysis log. `v4_cli ORIGINAL INSTRUMENTAL
+OUTPUT` runs the v4 separation alone and prints what it found (offset,
+polarity, drift, level tracking). The benchmark against 3.0 is in `eval/` (Python).
 
 ### Releasing
 
 `.github/workflows/build.yml` builds and tests on every push. Pushing a tag
-such as `v3.0.0` also creates a GitHub Release with `utagoe.exe` and its
+such as `v4.0.0` also creates a GitHub Release with `utagoe.exe` and its
 checksum attached:
 
 ```bash
-git tag v3.0.0
-git push origin v3.0.0
+git tag v4.0.0
+git push origin v4.0.0
 ```
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `src/engine/` | the processing: WAV I/O, settings and the INI format, FFT, `ThVocalFFT`, `CenterFocus`, FIR filters (`dsp`), analysis and block processing (`engine`) |
+| `src/engine/` | the processing: WAV I/O, settings and the INI format, FFT, `ThVocalFFT`, `CenterFocus`, FIR filters (`dsp`), analysis and block processing (`engine`), the Utagoe Rip 4 separation (`v4`) |
 | `src/app/` | the four windows, a small Win32 layer that reproduces the VCL controls (`ui`), the language tables, the file-name logic, and the resource script |
 | `res/` | icon, artwork and help ripped from the original, plus the English help |
 | `tests/engine_test.cpp` | the test suite and command-line harness |
+| `tests/v4_cli.cpp` | the v4 separation from the command line |
+| `eval/` | the benchmark against 3.0 and the Python prototype of v4 ([eval/README.md](eval/README.md)) |
 | `tools/rip_assets.py` | re-extracts the artwork from an original `utagoe.exe` (Python) |
 | `docs/ALGORITHM.md` | how the original works, with addresses in the binary |
 | `docs/readme_ja.txt` | the original readme |

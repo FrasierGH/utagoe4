@@ -35,7 +35,7 @@ jobs:
           [IO.File]::WriteAllText("$PWD/build/Release/utagoe.exe.sha256", "$hash  utagoe.exe`n")
           Get-Content build/Release/utagoe.exe.sha256
 
-      # Proves the exe was built here from this commit: gh attestation verify utagoe.exe --repo FrasierGH/utagoe
+      # Proves the exe was built here from this commit: gh attestation verify utagoe.exe --repo FrasierGH/utagoe4
       # (available for public repositories; skipped without failing the build elsewhere)
       - name: Attest build provenance
         if: github.event_name != 'pull_request'

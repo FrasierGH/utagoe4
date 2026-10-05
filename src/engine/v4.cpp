@@ -10,7 +10,10 @@
 #include <complex>
 #include <cstdlib>
 #include <map>
+#include <mutex>
 #include <numeric>
+#include <thread>
+#include <tuple>
 
 #include "dsp.hpp"
 
@@ -25,6 +28,24 @@ const double PI = 3.14159265358979323846;
 const size_t N = 8192;          // STFT (as 3.0's ThVocalFFT)
 const size_t HOPV = 1024;
 const size_t NB = N / 2 + 1;    // one-sided bins
+
+// fn(i, chunk) for i in [0, count), split into `chunks` contiguous runs on as many threads.
+// Sums kept per chunk and added in chunk order give the same result on every machine.
+const size_t CHUNKS = 16;
+template <class Fn>
+void parallel_for(size_t count, size_t chunks, Fn fn) {
+    chunks = std::max<size_t>(1, std::min(chunks, count));
+    if (chunks == 1) {
+        for (size_t i = 0; i < count; i++) fn(i, (size_t)0);
+        return;
+    }
+    std::vector<std::thread> th;
+    for (size_t t = 0; t < chunks; t++)
+        th.emplace_back([&, t] {
+            for (size_t i = count * t / chunks; i < count * (t + 1) / chunks; i++) fn(i, t);
+        });
+    for (auto& x : th) x.join();
+}
 
 size_t next_pow2(size_t n) {
     size_t p = 1;
@@ -163,16 +184,28 @@ std::vector<Biquad> butter4_bandpass(double lo, double hi, double rate) {
 
 std::vector<double> bandpass(const std::vector<double>& x, double rate) {
     static std::map<double, std::vector<Biquad>> cache;
-    auto it = cache.find(rate);
-    if (it == cache.end()) it = cache.emplace(rate, butter4_bandpass(100.0, 8000.0, rate)).first;
-    return sosfilt(it->second, x);
+    static std::mutex lock;
+    std::vector<Biquad> sos;
+    {
+        std::lock_guard<std::mutex> hold(lock);
+        auto it = cache.find(rate);
+        if (it == cache.end()) it = cache.emplace(rate, butter4_bandpass(100.0, 8000.0, rate)).first;
+        sos = it->second;
+    }
+    return sosfilt(sos, x);
 }
 
 std::vector<double> lowpass(const std::vector<double>& x, double rate) {
     static std::map<double, std::vector<Biquad>> cache;
-    auto it = cache.find(rate);
-    if (it == cache.end()) it = cache.emplace(rate, butter4_lowpass(1000.0, rate)).first;
-    return sosfilt(it->second, x);
+    static std::mutex lock;
+    std::vector<Biquad> sos;
+    {
+        std::lock_guard<std::mutex> hold(lock);
+        auto it = cache.find(rate);
+        if (it == cache.end()) it = cache.emplace(rate, butter4_lowpass(1000.0, rate)).first;
+        sos = it->second;
+    }
+    return sosfilt(sos, x);
 }
 
 // trial subtraction a - g k with the least-squares g: (residual / original, g)
@@ -230,14 +263,16 @@ struct Kernel {
     std::vector<double> tab;  // (phases + 1) x (2 half)
 };
 
-const Kernel& kernel(int half) {
-    static std::map<int, Kernel> cache;
-    auto it = cache.find(half);
+const Kernel& kernel(int half, double beta) {
+    static std::map<std::pair<int, double>, Kernel> cache;  // entries never move or change
+    static std::mutex lock;
+    std::lock_guard<std::mutex> hold(lock);
+    auto it = cache.find({half, beta});
     if (it != cache.end()) return it->second;
     Kernel k;
     k.half = half;
     k.phases = 1024;
-    const double beta = 9.0, i0b = bessel_i0(beta);
+    const double i0b = bessel_i0(beta);
     k.tab.resize((size_t)(k.phases + 1) * 2 * half);
     for (int p = 0; p <= k.phases; p++) {
         double fr = (double)p / k.phases;
@@ -248,15 +283,16 @@ const Kernel& kernel(int half) {
             k.tab[(size_t)p * 2 * half + j] = sinc * bessel_i0(beta * std::sqrt(std::max(r, 0.0))) / i0b;
         }
     }
-    return cache.emplace(half, std::move(k)).first->second;
+    return cache.emplace(std::make_pair(half, beta), std::move(k)).first->second;
 }
 
-// x sampled at fractional positions pos (zero outside x)
-std::vector<double> frac_read(const std::vector<double>& x, const std::vector<double>& pos, int half) {
-    const Kernel& K = kernel(half);
+// x sampled at fractional positions pos (zero outside x); `chunks` threads
+std::vector<double> frac_read(const std::vector<double>& x, const std::vector<double>& pos, int half,
+                              double beta = 9.0, size_t chunks = 1) {
+    const Kernel& K = kernel(half, beta);
     std::vector<double> out(pos.size(), 0.0);
     long long n = (long long)x.size();
-    for (size_t i = 0; i < pos.size(); i++) {
+    parallel_for(pos.size(), chunks, [&](size_t i, size_t) {
         double fl = std::floor(pos[i]);
         long long i0 = (long long)fl;
         long long q = (long long)std::nearbyint((pos[i] - fl) * K.phases);
@@ -267,7 +303,7 @@ std::vector<double> frac_read(const std::vector<double>& x, const std::vector<do
             if (idx >= 0 && idx < n) acc += x[(size_t)idx] * t[j];
         }
         out[i] = acc;
-    }
+    });
     return out;
 }
 
@@ -378,8 +414,30 @@ bool fit_lag_curve(const Track& tr, const std::vector<double>& at, double rate, 
         for (long long j = (long long)i - 2; j <= (long long)i + 2; j++)
             w5.push_back(tr.lags[(size_t)std::clamp(j, 0LL, (long long)m - 1)]);
         keep[i] = std::fabs(tr.lags[i] - median(w5)) < 2.0;
-        nk += keep[i];
     }
+    // At an edge the running median sees mostly copies of the point itself and passes
+    // anything, so the first and last two points are checked against the line through
+    // their four inner neighbours instead; 8 samples, as the second pass (+-16) can
+    // still correct anything closer
+    if (m >= 6) {
+        const size_t edge[4][2] = {{0, 1}, {1, 2}, {m - 1, m - 5}, {m - 2, m - 6}};
+        for (const auto& e : edge) {
+            size_t i = e[0], j0 = e[1];
+            double mx = 0, my = 0, vx = 0, cxy = 0;
+            for (size_t j = j0; j < j0 + 4; j++) mx += tr.centres[j] / 4, my += tr.lags[j] / 4;
+            for (size_t j = j0; j < j0 + 4; j++) {
+                vx += (tr.centres[j] - mx) * (tr.centres[j] - mx);
+                cxy += (tr.centres[j] - mx) * (tr.lags[j] - my);
+            }
+            double slope = vx > 0 ? cxy / vx : 0.0;
+            keep[i] = std::fabs(my + slope * (tr.centres[i] - mx) - tr.lags[i]) < 8.0;
+        }
+    }
+    // windows whose correlation peak is weak (the instrumental nearly silent, say in an
+    // a cappella passage) are not fitted: the curve is carried over them from the
+    // reliable ones around (proto.MIN_WEIGHT)
+    double wmin = 0.5 * median(tr.weights);
+    for (size_t i = 0; i < m; i++) keep[i] = keep[i] && tr.weights[i] >= wmin, nk += keep[i];
     if (nk < 3) std::fill(keep.begin(), keep.end(), 1);
     std::vector<double> c, y, w;
     for (size_t i = 0; i < m; i++)
@@ -450,7 +508,8 @@ std::vector<long long> window_peaks(const std::vector<double>& a, const std::vec
     size_t count = std::min<size_t>(16, (a.size() - W) / H + 1);
     size_t n = next_pow2(W + W + 2 * (size_t)m);
     FFT f(n);
-    for (size_t i = 0; i < count; i++) {
+    std::vector<std::vector<long long>> found(count);
+    parallel_for(count, count, [&](size_t i, size_t) {
         size_t w0 = count > 1 ? (size_t)((double)i * (double)(a.size() - W) / (double)(count - 1)) : 0;
         std::vector<double> sa(a.begin() + (long long)w0, a.begin() + (long long)(w0 + W));
         std::vector<double> sb = segment(b, (long long)w0 - m, W + 2 * (size_t)m);
@@ -467,9 +526,10 @@ std::vector<long long> window_peaks(const std::vector<double>& a, const std::vec
             if (std::fabs(r[(size_t)j]) > v1) v1 = std::fabs(r[(size_t)j]), first = j;
         for (long long j = 0; j <= 2 * m; j++)
             if (std::llabs(j - first) > sep && std::fabs(r[(size_t)j]) > v2) v2 = std::fabs(r[(size_t)j]), second = j;
-        out.push_back(first - m);
-        if (second != LLONG_MIN) out.push_back(second - m);
-    }
+        found[i].push_back(first - m);
+        if (second != LLONG_MIN) found[i].push_back(second - m);
+    });
+    for (const auto& v : found) out.insert(out.end(), v.begin(), v.end());
     return out;
 }
 
@@ -500,8 +560,10 @@ std::vector<Cand> find_lags(const std::vector<double>& a, const std::vector<doub
         }
         std::vector<double> r = irfft(B, f);
         if (a.size() <= E) {
-            for (long long d = 0; d < m; d++) lags.push_back(d), vals.push_back(r[(size_t)d]);
-            for (long long d = -m; d < 0; d++) lags.push_back(d), vals.push_back(r[(size_t)((long long)n + d)]);
+            // a short file covers fewer lags (n >= |a| + |b|, so these do not wrap)
+            long long mp = std::min(m, (long long)b.size()), mn = std::min(m, (long long)a.size());
+            for (long long d = 0; d < mp; d++) lags.push_back(d), vals.push_back(r[(size_t)d]);
+            for (long long d = -mn; d < 0; d++) lags.push_back(d), vals.push_back(r[(size_t)((long long)n + d)]);
         } else {
             for (long long d = 0; d <= 2 * m; d++) lags.push_back(d - m), vals.push_back(r[(size_t)d]);
         }
@@ -552,21 +614,24 @@ Pick pick_tracked(const std::vector<double>& a, const std::vector<double>& b, do
     std::vector<double> ab = bandpass(std::vector<double>(a.begin() + (long long)e0, a.begin() + (long long)(e0 + E)), rate);
     std::vector<double> sub;
     for (size_t t = e0; t < e0 + E; t += 256) sub.push_back((double)t);
-    Pick best{cands.front().lag, 1, mid};
-    double best_res = INFINITY;
-    for (const Cand& c : cands) {
-        Track tr = track_lags(a, b, rate, c.lag, 2.0, 1.0, 64, 512, e0, e0 + E, (long long)mid);
+    std::vector<double> res(cands.size()), gain(cands.size()), lag_mid(cands.size());
+    parallel_for(cands.size(), cands.size(), [&](size_t j, size_t) {
+        Track tr = track_lags(a, b, rate, cands[j].lag, 2.0, 1.0, 64, 512, e0, e0 + E, (long long)mid);
         std::vector<double> curve;
         fit_lag_curve(tr, sub, rate, &curve);
         std::vector<double> pos(E);
         for (size_t i = 0; i < E; i++) pos[i] = (double)(e0 + i) + interp1((double)(e0 + i), sub, curve);
         std::vector<double> k = bandpass(frac_read(b, pos, 16), rate);
-        auto [res, g] = trial(ab, k);
-        if (res < best_res) {
-            best_res = res;
-            best = {(long long)std::nearbyint(interp1((double)mid, sub, curve)), g >= 0 ? 1 : -1, mid};
+        std::tie(res[j], gain[j]) = trial(ab, k);
+        lag_mid[j] = interp1((double)mid, sub, curve);
+    });
+    Pick best{cands.front().lag, 1, mid};
+    double best_res = INFINITY;
+    for (size_t j = 0; j < cands.size(); j++)
+        if (res[j] < best_res) {
+            best_res = res[j];
+            best = {(long long)std::nearbyint(lag_mid[j]), gain[j] >= 0 ? 1 : -1, mid};
         }
-    }
     return best;
 }
 
@@ -663,36 +728,61 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     {
         std::vector<double> pos(n);
         for (size_t t = 0; t < n; t++) pos[t] = (double)t + interp1((double)t, centres, lag);
-        std::vector<double> k1 = frac_read(bm, pos, 32);
+        std::vector<double> k1 = frac_read(bm, pos, 32, 9.0, CHUNKS);
         Track t2 = track_lags(am, k1, rate, 0, 2.0, 1.0, 16, 16);
         for (size_t i = 0; i < t2.lags.size(); i++) t2.lags[i] += interp1(t2.centres[i], centres, lag);
         rep.drift_line = fit_lag_curve(t2, centres, rate, &lag);
     }
     if (!step(30)) return {};
     const double cap = opt.quality ? std::min(opt.kvol, 1.5) : opt.kvol;
-    std::vector<CVec> A, B;
+    // per-band sums over all frames, kept per chunk of frames and added in order
+    using Sums = std::vector<std::vector<CVec>>;  // [chunk][channel][bin]
+    auto zero_sums = [&] { return Sums(CHUNKS, std::vector<CVec>(C, CVec(NB, 0.0))); };
+    auto total = [&](const Sums& s, size_t c) {
+        CVec t(NB, 0.0);
+        for (const auto& part : s)
+            for (size_t b = 0; b < NB; b++) t[b] += part[c][b];
+        return t;
+    };
     // An EQ difference has a phase response (a low shelf delays the low band) that the
-    // refinement would read as timing, so it compares the mix with the karaoke through a
-    // first per-band EQ estimate (one pass, least squares, 1/3 octave)
-    std::vector<CVec> H0(C, CVec(NB, 0.0));
-    {
-        std::vector<CVec> n0(C, CVec(NB, 0.0)), d0(C, CVec(NB, 0.0));
-        for (size_t k = 0; k < F; k++) {
+    // refinement would read as timing, so it compares the mix with the karaoke through the
+    // EQ's phase (proto._eq_phase): a first per-band estimate (one pass, least squares,
+    // 1/3 octave) without its linear part, which is a pure delay and must stay visible
+    std::vector<CVec> H0;
+    auto eq_phase = [&]() {
+        Sums n0 = zero_sums(), d0 = zero_sums();
+        parallel_for(F, CHUNKS, [&](size_t k, size_t t) {
+            std::vector<CVec> A, B;
             st.frame(mix_in, k, 0.0, &A);
             st.frame(kar, k, lag[k], &B);
             for (size_t c = 0; c < C; c++)
-                for (size_t b = 0; b < NB; b++) n0[c][b] += A[c][b] * std::conj(B[c][b]), d0[c][b] += std::norm(B[c][b]);
-        }
+                for (size_t b = 0; b < NB; b++)
+                    n0[t][c][b] += A[c][b] * std::conj(B[c][b]), d0[t][c][b] += std::norm(B[c][b]);
+        });
+        H0.assign(C, CVec(NB));
         for (size_t c = 0; c < C; c++) {
-            CVec sn = smooth_bins(n0[c], 1.0 / 3), sd = smooth_bins(d0[c], 1.0 / 3);
-            for (size_t b = 0; b < NB; b++) H0[c][b] = sn[b] / (sd[b].real() + 1e-20);
+            CVec dc = total(d0, c);
+            CVec sn = smooth_bins(total(n0, c), 1.0 / 3), sd = smooth_bins(dc, 1.0 / 3);
+            double num = 0, den = 0;
+            for (size_t b = 0; b < NB; b++) {
+                H0[c][b] = sn[b] / (sd[b].real() + 1e-20);
+                double fhz = (double)b * rate / (double)N;
+                if (!(fhz > 100 && fhz < 6000)) continue;
+                double om = 2 * PI * fhz / rate, w = dc[b].real();
+                num += w * om * std::arg(H0[c][b]);
+                den += w * om * om;
+            }
+            double tau = -num / den;
+            for (size_t b = 0; b < NB; b++)
+                H0[c][b] = std::exp(cplx(0, std::arg(H0[c][b] * std::exp(cplx(0, 2 * PI * (double)b / (double)N * tau)))));
         }
-    }
+    };
     // per-frame refinement (proto.refine_frames): the phase slope of each frame's
     // cross-spectrum, bins weighted by how much the instrumental dominates them
     auto refine = [&](double f_hi) {
         std::vector<double> num(F), den(F);
-        for (size_t k = 0; k < F; k++) {
+        parallel_for(F, CHUNKS, [&](size_t k, size_t) {
+            std::vector<CVec> A, B;
             st.frame(mix_in, k, 0.0, &A);
             st.frame(kar, k, lag[k], &B);
             double nu = 0, de = 0;
@@ -713,21 +803,18 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
             }
             num[k] = nu;
             den[k] = de + 1e-30;
-        }
+        });
         double md = median(den) + 1e-30;
         std::vector<double> cd(F), conf(F), delta(F);
         for (size_t k = 0; k < F; k++) conf[k] = den[k] / md, cd[k] = conf[k] * (num[k] / den[k]);
         std::vector<double> s1 = gauss1d(cd, 3.0), s2 = gauss1d(conf, 3.0);
         for (size_t k = 0; k < F; k++) delta[k] = s1[k] / (s2[k] + 0.05);
-        // only the time-varying part: a constant part is an EQ difference's phase
-        // response (the per-band gains take care of it); the coarse windows have the offset
-        double mid = median(F > 100 ? std::vector<double>(delta.begin() + 40, delta.end() - 40) : delta);
-        for (double& v : delta) v -= mid;
         return delta;
     };
     // A wobble faster than the windows (a 33 rpm record: 1.8 s) averages out in them and
     // can pass for a straight line, so the first refinement always runs; the line is
     // kept when that finds nothing (median correction under 0.75 samples)
+    eq_phase();
     std::vector<double> d1 = refine(2000.0);
     if (!step(38)) return {};
     std::vector<double> inner = F > 100 ? std::vector<double>(d1.begin() + 40, d1.end() - 40) : d1;
@@ -735,6 +822,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     if (!rep.drift_line || median(inner) >= 0.75) {
         rep.drift_line = false;
         for (size_t k = 0; k < F; k++) lag[k] += d1[k];
+        eq_phase();  // re-estimated once the first pass has taken out most of a wobble
         std::vector<double> d2 = refine(6000.0);
         for (size_t k = 0; k < F; k++) lag[k] += d2[k];
         if (!step(46)) return {};
@@ -742,35 +830,61 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     rep.lag_start = lag.front();
     rep.lag_end = lag.back();
 
-    // --- per-band EQ: two passes, the second over the cells the instrumental dominates
-    std::vector<CVec> num(C, CVec(NB, 0.0)), den(C, CVec(NB, 0.0)), pa(C, CVec(NB, 0.0));
-    for (size_t k = 0; k < F; k++) {
-        st.frame(mix_in, k, 0.0, &A);
-        st.frame(kar, k, lag[k], &B);
-        for (size_t c = 0; c < C; c++)
-            for (size_t b = 0; b < NB; b++) num[c][b] += A[c][b] * std::conj(B[c][b]), den[c][b] += std::norm(B[c][b]);
+    // Frames are cut from the karaoke at one lag each (proto._stft_along): exact while
+    // the lag holds still over a frame. When it moves by more than 0.6 samples across one
+    // (fast drift, wow; proto.MAX_STRETCH) the karaoke is resampled along the curve instead.
+    Planar kres;
+    {
+        const size_t d = N / HOPV;
+        std::vector<double> sp;
+        for (size_t k = d; k < F; k++) sp.push_back(std::fabs(lag[k] - lag[k - d]));
+        rep.stretch = sp.empty() ? 0.0 : median(sp);
     }
+    rep.resampled = rep.stretch > 0.6;
+    if (rep.resampled) {
+        std::vector<double> pos(n);
+        for (size_t t = 0; t < n; t++) pos[t] = (double)t + interp1((double)t, centres, lag);
+        for (const auto& ch : kar) kres.push_back(frac_read(ch, pos, 64, 10.0, CHUNKS));
+    }
+    auto frame_kar = [&](size_t k, std::vector<CVec>* B) {
+        if (rep.resampled)
+            st.frame(kres, k, 0.0, B);
+        else
+            st.frame(kar, k, lag[k], B);
+    };
+
+    // --- per-band EQ: two passes, the second over the cells the instrumental dominates
+    Sums num = zero_sums(), den = zero_sums(), pa = zero_sums();
+    parallel_for(F, CHUNKS, [&](size_t k, size_t t) {
+        std::vector<CVec> A, B;
+        st.frame(mix_in, k, 0.0, &A);
+        frame_kar(k, &B);
+        for (size_t c = 0; c < C; c++)
+            for (size_t b = 0; b < NB; b++)
+                num[t][c][b] += A[c][b] * std::conj(B[c][b]), den[t][c][b] += std::norm(B[c][b]);
+    });
     std::vector<CVec> H(C, CVec(NB));
     for (size_t c = 0; c < C; c++) {
-        CVec sn = smooth_bins(num[c], opt.octave), sd = smooth_bins(den[c], opt.octave);
+        CVec sn = smooth_bins(total(num, c), opt.octave), sd = smooth_bins(total(den, c), opt.octave);
         for (size_t b = 0; b < NB; b++) H[c][b] = sn[b] / (sd[b].real() + 1e-20);
-        std::fill(num[c].begin(), num[c].end(), 0.0);
-        std::fill(den[c].begin(), den[c].end(), 0.0);
     }
+    num = zero_sums(), den = zero_sums();
     if (!step(58)) return {};
-    for (size_t k = 0; k < F; k++) {
+    parallel_for(F, CHUNKS, [&](size_t k, size_t t) {
+        std::vector<CVec> A, B;
         st.frame(mix_in, k, 0.0, &A);
-        st.frame(kar, k, lag[k], &B);
+        frame_kar(k, &B);
         for (size_t c = 0; c < C; c++)
             for (size_t b = 0; b < NB; b++)
                 if (std::abs(H[c][b] * B[c][b]) * cap > std::abs(A[c][b])) {
-                    num[c][b] += A[c][b] * std::conj(B[c][b]);
-                    den[c][b] += std::norm(B[c][b]);
-                    pa[c][b] += std::norm(A[c][b]);
+                    num[t][c][b] += A[c][b] * std::conj(B[c][b]);
+                    den[t][c][b] += std::norm(B[c][b]);
+                    pa[t][c][b] += std::norm(A[c][b]);
                 }
-    }
+    });
     for (size_t c = 0; c < C; c++) {
-        CVec sn = smooth_bins(num[c], opt.octave), sd = smooth_bins(den[c], opt.octave), sp = smooth_bins(pa[c], opt.octave);
+        CVec sn = smooth_bins(total(num, c), opt.octave), sd = smooth_bins(total(den, c), opt.octave),
+             sp = smooth_bins(total(pa, c), opt.octave);
         for (size_t b = 0; b < NB; b++) {
             double d = sd[b].real() + 1e-20;
             H[c][b] = std::sqrt(sp[b].real() / d) * std::exp(cplx(0, std::arg(sn[b] / d)));
@@ -778,44 +892,84 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     }
     if (!step(70)) return {};
 
-    // --- per-frame level correction where the instrumental dominates. Auto: estimated
-    // on the even bins, it must cut the residual on the odd bins by lvl_gain.
+    // --- per-frame level correction (proto._level_track), in three passes, each
+    // smoothed over frames: least squares over all cells, then over the cells the
+    // corrected estimate says the instrumental dominates, then |gain| from those cells'
+    // power ratio. Auto: estimated on the even bins, it must cut the residual on the odd
+    // bins (cells the uncorrected estimate says the instrumental dominates) by lvl_gain.
     std::vector<std::vector<double>> corr(C, std::vector<double>(F, 1.0));
     bool apply_level = false;
     if (opt.level_track) {
-        auto zeros = [&] { return std::vector<std::vector<double>>(C, std::vector<double>(F, 0.0)); };
-        auto ln = zeros(), ld = zeros(), le = zeros(), lde = zeros(), oa = zeros(), ox = zeros(), oi = zeros();
-        for (size_t k = 0; k < F; k++) {
-            st.frame(mix_in, k, 0.0, &A);
-            st.frame(kar, k, lag[k], &B);
-            for (size_t c = 0; c < C; c++)
-                for (size_t b = 0; b < NB; b++) {
-                    cplx I = H[c][b] * B[c][b];
-                    if (!(std::abs(I) * cap > std::abs(A[c][b]))) continue;
-                    double x = (A[c][b] * std::conj(I)).real(), ii = std::norm(I);
-                    ln[c][k] += x, ld[c][k] += ii;
-                    if (b % 2 == 0) {
-                        le[c][k] += x, lde[c][k] += ii;
-                    } else {
-                        oa[c][k] += std::norm(A[c][b]), ox[c][k] += x, oi[c][k] += ii;
+        using Curves = std::vector<std::vector<double>>;  // [channel][frame]
+        auto zeros = [&] { return Curves(C, std::vector<double>(F, 0.0)); };
+        // smoothed nu / de, 1 where de vanishes; `root`: the square root, unclipped
+        auto ratio = [&](const std::vector<double>& nu, const std::vector<double>& de, bool root) {
+            std::vector<double> sn = gauss1d(nu, 2.0), sd = gauss1d(de, 2.0), c(F);
+            for (size_t k = 0; k < F; k++) {
+                if (!(sd[k] > 1e-12)) {
+                    c[k] = 1.0;
+                    continue;
+                }
+                double v = sn[k] / (sd[k] + 1e-20);
+                c[k] = root ? std::sqrt(v) : std::clamp(v, 0.25, 4.0);
+            }
+            return c;
+        };
+        // set 0: all bins (the correction), set 1: even bins (the out-of-sample test)
+        Curves g[2] = {zeros(), zeros()};  // the correction so far
+        for (auto& x : g)
+            for (auto& ch : x) std::fill(ch.begin(), ch.end(), 1.0);
+        Curves c0[2] = {zeros(), zeros()}, c1[2] = {zeros(), zeros()};
+        Curves oa = zeros(), ox = zeros(), oi = zeros();
+        for (int step = 0; step < 3; step++) {
+            Curves nu[2] = {zeros(), zeros()}, de[2] = {zeros(), zeros()};
+            parallel_for(F, CHUNKS, [&](size_t k, size_t) {
+                std::vector<CVec> A, B;
+                st.frame(mix_in, k, 0.0, &A);
+                frame_kar(k, &B);
+                for (size_t c = 0; c < C; c++)
+                    for (size_t b = 0; b < NB; b++) {
+                        cplx I = H[c][b] * B[c][b];
+                        double aa = std::norm(A[c][b]);
+                        if (step == 0 && b % 2 == 1 && std::abs(I) * cap > std::abs(A[c][b])) {
+                            double x = (A[c][b] * std::conj(I)).real();
+                            oa[c][k] += aa, ox[c][k] += x, oi[c][k] += std::norm(I);
+                        }
+                        for (int set = 0; set < 2; set++) {
+                            if (set == 1 && b % 2) continue;
+                            cplx X = I * g[set][c][k];
+                            if (step > 0 && !(std::abs(X) * cap > std::abs(A[c][b]))) continue;
+                            if (step < 2)
+                                nu[set][c][k] += (A[c][b] * std::conj(X)).real(), de[set][c][k] += std::norm(X);
+                            else
+                                nu[set][c][k] += aa, de[set][c][k] += std::norm(X);
+                        }
+                    }
+            });
+            for (int set = 0; set < 2; set++)
+                for (size_t c = 0; c < C; c++) {
+                    std::vector<double> f = ratio(nu[set][c], de[set][c], step == 2);
+                    if (step == 0) {
+                        c0[set][c] = g[set][c] = f;
+                    } else if (step == 1) {
+                        c1[set][c] = f;
+                        for (size_t k = 0; k < F; k++) g[set][c][k] = c0[set][c][k] * f[k];
+                    } else {  // c0 * clip(c1 * r)
+                        for (size_t k = 0; k < F; k++)
+                            g[set][c][k] = std::clamp(c0[set][c][k] * std::clamp(c1[set][c][k] * f[k], 0.25, 4.0), 0.25, 4.0);
                     }
                 }
         }
-        auto curve = [&](const std::vector<double>& nu, const std::vector<double>& de) {
-            std::vector<double> sn = gauss1d(nu, 2.0), sd = gauss1d(de, 2.0), c(F);
-            for (size_t k = 0; k < F; k++) c[k] = std::clamp(sd[k] > 1e-12 ? sn[k] / (sd[k] + 1e-20) : 1.0, 0.25, 4.0);
-            return c;
-        };
         double r0 = 0, r1 = 0;
         for (size_t c = 0; c < C; c++) {
-            corr[c] = curve(ln[c], ld[c]);
-            std::vector<double> ce = curve(le[c], lde[c]);
+            corr[c] = g[0][c];
+            const std::vector<double>& ce = g[1][c];
             for (size_t k = 0; k < F; k++) {
                 r0 += oa[c][k] - 2 * ox[c][k] + oi[c][k];
                 r1 += oa[c][k] - 2 * ce[k] * ox[c][k] + ce[k] * ce[k] * oi[c][k];
             }
         }
-        rep.level_gain = 1 - r1 / std::max(r0, 1e-30);
+        rep.level_gain = r0 > 1e-30 ? 1 - r1 / r0 : 0.0;  // nothing to correct in silence
         apply_level = opt.level_track == 1 || rep.level_gain > opt.lvl_gain;
     }
     rep.level_applied = apply_level;
@@ -827,40 +981,51 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     size_t ext = (F - 1) * HOPV + N;
     Planar acc(C, std::vector<double>(ext, 0.0));
     std::vector<double> norm(ext, 0.0);
-    CVec z(N);
-    for (size_t k = 0; k < F; k++) {
-        st.frame(mix_in, k, 0.0, &A);
-        st.frame(kar, k, lag[k], &B);
-        std::vector<CVec> V(C, CVec(NB));
-        for (size_t c = 0; c < C; c++) {
-            double g = apply_level ? corr[c][k] : 1.0;
-            for (size_t b = 0; b < NB; b++) {
-                cplx I = H[c][b] * B[c][b] * g;
-                bool kill = std::abs(I) * cap > std::abs(A[c][b]);
-                if (kill && opt.quality) kill = phase_diff(A[c][b], I) < thr[b];
-                V[c][b] = kill ? cplx(0.0) : A[c][b] - I;
+    const size_t BLOCK = 256;
+    std::vector<CVec> zs(BLOCK, CVec(N));
+    for (size_t k0 = 0; k0 < F; k0 += BLOCK) {
+        size_t cnt = std::min(BLOCK, F - k0);
+        parallel_for(cnt, CHUNKS, [&](size_t i, size_t) {
+            size_t k = k0 + i;
+            std::vector<CVec> A, B;
+            st.frame(mix_in, k, 0.0, &A);
+            frame_kar(k, &B);
+            std::vector<CVec> V(C, CVec(NB));
+            for (size_t c = 0; c < C; c++) {
+                double g = apply_level ? corr[c][k] : 1.0;
+                for (size_t b = 0; b < NB; b++) {
+                    cplx I = H[c][b] * B[c][b] * g;
+                    bool kill = std::abs(I) * cap > std::abs(A[c][b]);
+                    if (kill && opt.quality) kill = phase_diff(A[c][b], I) < thr[b];
+                    V[c][b] = kill ? cplx(0.0) : A[c][b] - I;
+                }
+            }
+            // both channels in one inverse FFT: Hermitian(L) + i Hermitian(R)
+            auto herm = [&](const CVec& v, size_t b) -> cplx {
+                if (b == 0) return cplx(v[0].real(), 0.0);
+                if (b == N / 2) return cplx(v[N / 2].real(), 0.0);
+                return b < N / 2 ? v[b] : std::conj(v[N - b]);
+            };
+            CVec& z = zs[i];
+            for (size_t b = 0; b < N; b++) {
+                cplx l = herm(V[0], b) * st.wsum;
+                cplx r = C > 1 ? herm(V[1], b) * st.wsum : cplx(0.0);
+                z[b] = l + cplx(0, 1) * r;
+            }
+            st.fft.inverse(z.data());
+        });
+        for (size_t i = 0; i < cnt; i++) {
+            size_t k = k0 + i;
+            const CVec& z = zs[i];
+            for (size_t j = 0; j < N; j++) {
+                size_t t = k * HOPV + j;
+                double w = st.win[j];
+                acc[0][t] += z[j].real() / (double)N * w;
+                if (C > 1) acc[1][t] += z[j].imag() / (double)N * w;
+                norm[t] += w * w;
             }
         }
-        // both channels in one inverse FFT: Hermitian(L) + i Hermitian(R)
-        auto herm = [&](const CVec& v, size_t b) -> cplx {
-            if (b == 0) return cplx(v[0].real(), 0.0);
-            if (b == N / 2) return cplx(v[N / 2].real(), 0.0);
-            return b < N / 2 ? v[b] : std::conj(v[N - b]);
-        };
-        for (size_t b = 0; b < N; b++) {
-            cplx l = herm(V[0], b) * st.wsum;
-            cplx r = C > 1 ? herm(V[1], b) * st.wsum : cplx(0.0);
-            z[b] = l + cplx(0, 1) * r;
-        }
-        st.fft.inverse(z.data());
-        for (size_t j = 0; j < N; j++) {
-            size_t t = k * HOPV + j;
-            double w = st.win[j];
-            acc[0][t] += z[j].real() / (double)N * w;
-            if (C > 1) acc[1][t] += z[j].imag() / (double)N * w;
-            norm[t] += w * w;
-        }
-        if (k % 256 == 0 && !step(78 + (int)(20 * k / F))) return {};
+        if (!step(78 + (int)(20 * (k0 + cnt) / F))) return {};
     }
     Planar out(C, std::vector<double>(n));
     for (size_t c = 0; c < C; c++)

@@ -53,9 +53,10 @@ int wmain(int argc, wchar_t** argv) {
     };
     v4::Report rep;
     auto y = v4::separate(planar(orig), planar(kar), orig.rate, opt, &rep);
-    std::printf("lag %ld sign %d drift_line %d lag_start %.3f lag_end %.3f level_gain %.3f level_applied %d\n",
-                rep.lag, rep.sign, (int)rep.drift_line, rep.lag_start, rep.lag_end, rep.level_gain,
-                (int)rep.level_applied);
+    std::printf("lag %ld sign %d drift_line %d lag_start %.3f lag_end %.3f stretch %.3f resampled %d "
+                "level_gain %.3f level_applied %d\n",
+                rep.lag, rep.sign, (int)rep.drift_line, rep.lag_start, rep.lag_end, rep.stretch, (int)rep.resampled,
+                rep.level_gain, (int)rep.level_applied);
     Audio out;
     out.rate = orig.rate;
     out.channels = orig.channels;

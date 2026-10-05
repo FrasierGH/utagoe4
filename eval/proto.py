@@ -63,8 +63,9 @@ def find_lag(mix, kar, rate, max_sec=10.0, candidates=6, sep=256, return_all=Fal
         n = 1 << int(np.ceil(np.log2(len(a) + len(b))))
         X = np.fft.rfft(b, n) * np.conj(np.fft.rfft(a, n))
         r = np.fft.irfft(X / (np.abs(X) + 1e-12), n)
-        lags = np.concatenate([np.arange(0, m), np.arange(-m, 0)])
-        vals = np.concatenate([r[:m], r[-m:]])
+        mp, mn = min(m, len(b)), min(m, len(a))    # a short file covers fewer lags
+        lags = np.concatenate([np.arange(0, mp), np.arange(-mn, 0)])
+        vals = np.concatenate([r[:mp], r[n - mn:]])
     else:
         # a long song: correlate an excerpt from the middle against the karaoke +-m
         # around it (the FFT of a whole song would need gigabytes)
@@ -220,6 +221,9 @@ def track_lags(mix, kar, rate, lag0, win_sec=2.0, hop_sec=1.0, search=64, search
     return np.array(centres)[o], np.array(lags)[o], np.array(weights)[o]
 
 
+MIN_WEIGHT = 0.5    # windows below this fraction of the median peak are not fitted
+
+
 def fit_lag_curve(centres, lags, weights, at, sigma_sec=1.5, rate=44100):
     """The lag at positions `at` (samples). Outliers (more than 2 samples from a
     running median) are dropped. A straight line (clock drift) is used when it fits
@@ -233,6 +237,18 @@ def fit_lag_curve(centres, lags, weights, at, sigma_sec=1.5, rate=44100):
         return np.full(len(at), np.median(lags)), True
     med = ndimage.median_filter(lags, size=5, mode='nearest')
     keep = np.abs(lags - med) < 2.0
+    # At an edge the running median sees mostly copies of the point itself and passes
+    # anything, so the first and last two points are checked against the line through
+    # their four inner neighbours instead; 8 samples, as the second pass (+-16) can
+    # still correct anything closer
+    m = len(lags)
+    if m >= 6:
+        for i, nb in ((0, slice(1, 5)), (1, slice(2, 6)), (m - 1, slice(m - 5, m - 1)), (m - 2, slice(m - 6, m - 2))):
+            keep[i] = abs(np.polyval(np.polyfit(centres[nb], lags[nb], 1), centres[i]) - lags[i]) < 8.0
+    # windows whose correlation peak is weak (the instrumental nearly silent, say in an
+    # a cappella passage) are not fitted: the curve is carried over them from the
+    # reliable ones around
+    keep &= weights >= MIN_WEIGHT * np.median(weights)
     if keep.sum() < 3:
         keep[:] = True
     c, w, y = centres[keep], weights[keep], lags[keep]
@@ -265,10 +281,10 @@ def _kernel_table(half, phases=1024, beta=9.0):
     return _KERNELS[key]
 
 
-def frac_read(x, pos, half=32, phases=1024):
+def frac_read(x, pos, half=32, phases=1024, beta=9.0):
     """x sampled at fractional positions `pos` (Kaiser-windowed sinc, 2*half taps; the
     fraction is quantised to 1/phases of a sample). Zero outside x."""
-    tab = _kernel_table(half, phases)
+    tab = _kernel_table(half, phases, beta)
     i0 = np.floor(pos).astype(np.int64)
     q = np.rint((pos - i0) * phases).astype(np.int64)
     xp = np.pad(x, ((half, half + 1), (0, 0)))
@@ -396,22 +412,30 @@ def align_frames(mix, kar, A, rate, lag0, seed=None, keep_line=0.75, cap=1.2):
     # can pass for a straight line, so the first per-frame refinement always runs; the
     # line is kept when that finds nothing (median correction under `keep_line`)
     # An EQ difference has a phase response (a low shelf delays the low band) that the
-    # refinement would read as timing, so it compares the mix with the karaoke through a
-    # first per-band EQ estimate; and it only contributes the time-varying part (the
-    # broadband coarse windows already have the offset).
-    B = _stft_along(kar, lag)
-    H0 = _estimate_h(A, B, 1.0, cap, 1 / 3, 1, 'regress')[:, :, None]
-    d1 = _varying(refine_frames(A, H0 * B, rate, 2000.0))
+    # refinement would read as timing, so it compares the mix with the karaoke through
+    # the EQ's phase (_eq_phase), re-estimated once the first pass has taken out most of
+    # a wobble (a wobble smears the estimate).
+    d1 = refine_frames(A, _eq_phase(A, _stft_along(kar, lag), rate, cap) * _stft_along(kar, lag), rate, 2000.0)
     inner = d1[40:-40] if len(d1) > 100 else d1
     if is_line and np.median(np.abs(inner)) < keep_line:
         return lag
     lag = lag + d1
-    return lag + _varying(refine_frames(A, H0 * _stft_along(kar, lag), rate, 6000.0))
+    B = _stft_along(kar, lag)
+    return lag + refine_frames(A, _eq_phase(A, B, rate, cap) * B, rate, 6000.0)
 
 
-def _varying(d):
-    """d minus its median (over the frames away from the edges)."""
-    return d - np.median(d[40:-40] if len(d) > 100 else d)
+def _eq_phase(A, B, rate, cap):
+    """The phase of a first per-band EQ estimate (one pass, least squares, 1/3 octave)
+    without its linear part: the linear part is a pure delay, which is timing and has to
+    stay visible to the refinement. Unit magnitude, (ch, bins, 1)."""
+    H = _estimate_h(A, B, 1.0, cap, 1 / 3, 1, 'regress')
+    f = np.arange(H.shape[1]) * rate / N
+    band = (f > 100) & (f < 6000)
+    om = 2 * np.pi * f[band] / rate
+    w = np.sum(np.abs(B[:, band]) ** 2, axis=2)
+    tau = -np.sum(w * om * np.angle(H[:, band]), axis=1) / np.sum(w * om * om, axis=1)
+    H = H * np.exp(1j * 2 * np.pi * np.arange(H.shape[1])[None, :] / N * tau[:, None])
+    return np.exp(1j * np.angle(H))[:, :, None]
 
 
 # ---------------------------------------------------------------- helpers
@@ -477,17 +501,29 @@ def _choose_eq(A, B, g, cap, passes, mag, models=(1 / 3, 1.0, None)):
 
 
 def _level_track(A, I, cap, sigma_frames=2.0, bins=slice(None)):
-    """Per-frame gain correction for I (compression differences): least squares over
-    the cells (of `bins`) where the instrumental dominates, smoothed over frames,
-    clipped to +-12 dB."""
+    """Per-frame gain correction for I (compression differences), in three steps, each
+    smoothed over frames: least squares over all cells (the vocal is uncorrelated with
+    the instrumental, so this is unbiased, if noisy, even where I is far off, as in the
+    vocal's pauses when the album's compressor works less there; selecting cells by the
+    uncorrected I would find none there), least squares over the cells the corrected I
+    says the instrumental dominates, and |gain| from the power ratio of those cells
+    (the selection truncates |A|, which biases least squares low). Clipped to +-12 dB."""
     A, I = A[:, bins], I[:, bins]
-    w = np.abs(I) * cap > np.abs(A)
-    num = np.sum(np.where(w, np.real(A * np.conj(I)), 0), axis=1)        # (ch, frames)
-    den = np.sum(np.where(w, np.abs(I) ** 2, 0), axis=1)
     sm = lambda z: ndimage.gaussian_filter1d(z, sigma_frames, axis=1, mode='nearest')
-    c = sm(num) / (sm(den) + 1e-20)
-    c = np.where(sm(den) > 1e-12, c, 1.0)
-    return np.clip(c, 0.25, 4.0)
+
+    def ls(w, X):
+        num = sm(np.sum(np.where(w, np.real(A * np.conj(X)), 0), axis=1))      # (ch, frames)
+        den = sm(np.sum(np.where(w, np.abs(X) ** 2, 0), axis=1))
+        return np.clip(np.where(den > 1e-12, num / (den + 1e-20), 1.0), 0.25, 4.0)
+    c0 = ls(True, I)
+    I0 = I * c0[:, None, :]
+    c1 = ls(np.abs(I0) * cap > np.abs(A), I0)
+    I1 = I0 * c1[:, None, :]
+    w = np.abs(I1) * cap > np.abs(A)
+    pa = sm(np.sum(np.where(w, np.abs(A) ** 2, 0), axis=1))
+    pi = sm(np.sum(np.where(w, np.abs(I1) ** 2, 0), axis=1))
+    r = np.where(pi > 1e-12, np.sqrt(pa / (pi + 1e-20)), 1.0)
+    return np.clip(c0 * np.clip(c1 * r, 0.25, 4.0), 0.25, 4.0)
 
 
 def _level_gain(A, I, cap, c):
@@ -500,10 +536,23 @@ def _level_gain(A, I, cap, c):
     ii = np.sum(np.where(w, np.abs(i) ** 2, 0), axis=1)
     r0 = np.sum(pa - 2 * x + ii)
     r1 = np.sum(pa - 2 * c * x + c * c * ii)
-    return 1 - r1 / max(r0, 1e-30)
+    return 1 - r1 / r0 if r0 > 1e-30 else 0.0      # nothing to correct in silence
 
 
 # ---------------------------------------------------------------- the separator
+# Frames are cut from the karaoke at one lag each, the fraction applied as a linear
+# phase: exact while the lag holds still over a frame. When it moves by more than this
+# across one (N samples; 0.6 is about 70 ppm of drift) the karaoke is resampled along
+# the lag curve instead, which costs some accuracy near Nyquist (a finite sinc).
+MAX_STRETCH = 0.6
+
+
+def stretch(frame_lag):
+    """Typical change of the lag across one frame (N = 8 hops), in samples."""
+    d = N // HOP
+    return float(np.median(np.abs(frame_lag[d:] - frame_lag[:-d]))) if len(frame_lag) > d else 0.0
+
+
 def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.2, quality=True,
              octave=1 / 3, passes=2, mag='power', align='global', lvl_gain=0.13):
     """Returns the vocal estimate (same shape as mix)."""
@@ -520,8 +569,15 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
         B = _stft(k)
     elif align == 'track':
         frame_lag = align_frames(mix, kar, A, rate, lag0, seed, cap=min(kvol, 1.5) if quality else kvol)
-        B = _stft_along(kar, frame_lag)
-        k = frac_read(kar, np.arange(n) + np.interp(np.arange(n), np.arange(len(frame_lag)) * HOP, frame_lag))
+        pos = np.arange(n) + np.interp(np.arange(n), np.arange(len(frame_lag)) * HOP, frame_lag)
+        if stretch(frame_lag) > MAX_STRETCH:
+            # the lag moves within a frame (fast drift, wow), so a frame cut at one lag is
+            # off towards its edges: resample the karaoke along the curve instead
+            k = frac_read(kar, pos, half=64, beta=10.0)
+            B = _stft(k)
+        else:
+            B = _stft_along(kar, frame_lag)
+            k = frac_read(kar, pos)
     else:
         raise ValueError(align)
     cap = min(kvol, 1.5) if quality else kvol

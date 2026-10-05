@@ -25,6 +25,8 @@ struct Report {
     double lag_start = 0, lag_end = 0;
     double level_gain = 0;     // out-of-sample residual reduction of the level correction
     bool level_applied = false;
+    double stretch = 0;        // typical lag change across one frame, samples
+    bool resampled = false;    // the karaoke was resampled along the lag curve (stretch > 0.6)
 };
 
 // mix and kar: planar, the same number of channels (1 or 2), samples in [-1, 1].

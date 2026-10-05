@@ -30,9 +30,9 @@ void AboutForm::run() {
         label(hwnd, l.credits_x, l.credits_y, l.credits);
     if (scaled()) {  // VerLabel has ParentFont = False
         big_font_ = make_font(L"ＭＳ Ｐゴシック", SHIFTJIS_CHARSET, ui::scaled_font_height(-16, scale_m, scale_d));
-        label(hwnd, 166, 80, L"Version 3.0", big_font_);
+        label(hwnd, 166, 80, L"Version 4.0", big_font_);
     } else {
-        label(hwnd, 166, 80, L"Version 3.0", main_->about_font_big);
+        label(hwnd, 166, 80, L"Version 4.0", main_->about_font_big);
     }
     img_ = {16, 17, 225, 64};  // LogoImg (Center = True)
     scale_rect(img_.x, img_.y, img_.w, img_.h);

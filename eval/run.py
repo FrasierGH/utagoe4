@@ -45,9 +45,12 @@ ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, 'work')
 RATE = 44100
 
-# 'fresh' was added last, after fixes prompted by failures in 'test': untouched by any choice
-SYNTH_SEEDS = {'dev': range(1000, 1003), 'test': range(2000, 2010), 'fresh': range(3000, 3020)}
-STEMS_SPLIT = {'dev': slice(0, 10), 'test': slice(10, None), 'fresh': slice(0, 0)}
+# 'fresh' was added after fixes prompted by failures in 'test'; three of its songs were
+# then looked at while diagnosing fast drift. 'final' was added last, untouched by any
+# choice.
+SYNTH_SEEDS = {'dev': range(1000, 1003), 'test': range(2000, 2010), 'fresh': range(3000, 3020),
+               'final': range(4000, 4020)}
+STEMS_SPLIT = {'dev': slice(0, 10), 'test': slice(10, None), 'fresh': slice(0, 0), 'final': slice(0, 0)}
 
 
 def _hash(*parts):
@@ -222,6 +225,7 @@ def bootstrap_ci(d, n=4000, seed=0):
 
 def summarize(rows, scenarios, engines, metric, ref):
     lower = metric == 'leak'
+    rows = [r for r in rows if np.isfinite(r[metric])]      # e.g. leak needs a pause in the vocal
     print(f'\n{metric} (dB, mean over {len({r["song"] for r in rows})} songs; {"lower" if lower else "higher"} is better)\n')
     print('| scenario | ' + ' | '.join(engines) + ' |')
     print('|---|' + '---:|' * len(engines))
@@ -252,7 +256,7 @@ def summarize(rows, scenarios, engines, metric, ref):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--set', choices=['dev', 'test', 'fresh'], default='dev')
+    ap.add_argument('--set', choices=list(SYNTH_SEEDS), default='dev')
     ap.add_argument('--stems', help='a folder of real multitrack songs (e.g. MUSDB18-HQ test/)')
     ap.add_argument('--limit', type=int, default=0, help='only the first N songs of the set')
     ap.add_argument('--seconds', type=float, default=30.0)
@@ -282,8 +286,7 @@ def main():
                 for r in csv.DictReader(f):
                     if r['engine'] in engines and r['scenario'] in scenarios:
                         latest[(r['song'], r['scenario'], r['engine'])] = {**r, **{k: float(r[k]) for k in keys}}
-        rows = [r for r in latest.values() if all(np.isfinite(r[k]) for k in keys)]
-        summarize(rows, scenarios, engines, args.metric, args.ref)
+        summarize(list(latest.values()), scenarios, engines, args.metric, args.ref)
         return
     case_ver = _hash(_src('degrade.py'), _src('synth.py'), args.seconds, args.start, tag)
     versions = {en: engine_version(en) for en in engines}
@@ -321,8 +324,8 @@ def main():
         w.writeheader()
         w.writerows(rows)
     if nan:
-        print(f'\nWARNING: {nan} non-finite scores; those rows are excluded from the summary')
-        rows = [r for r in rows if all(np.isfinite(r[k]) for k in ('median_sdr', 'sdr', 'si_sdr', 'leak'))]
+        print(f'\nnote: {nan} scores are undefined (e.g. leak when the vocal never pauses); '
+              'each metric skips only its own')
     summarize(rows, scenarios, engines, args.metric, args.ref)
 
 

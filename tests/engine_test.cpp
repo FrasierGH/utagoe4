@@ -220,6 +220,31 @@ int self_test() {
         Run rl = run(lead, v);
         expect(logged(rl, L"v4 lag:-5000"), "v4: original with longer lead-in");
         expect(snr(rl.out, lead.vocal) > 25, "v4: original with longer lead-in extracted");
+        // an instrumental that plays 300 ppm slow (clock drift): the lag moves 2.5 samples
+        // across a frame, so v4 resamples it along the lag curve
+        Song dr = s;
+        const double PI = 3.14159265358979323846, ratio = 1.0 / (1.0 + 300e-6);
+        const int half = 16;
+        size_t frames = s.inst.frames();
+        for (size_t i = 0; i < frames; i++) {
+            double pos = (double)i * ratio, fl = std::floor(pos);
+            for (int c = 0; c < 2; c++) {
+                double acc = 0;
+                for (int j = -half + 1; j <= half; j++) {
+                    long long idx = (long long)fl + j;
+                    if (idx < 0 || idx >= (long long)frames) continue;
+                    double u = pos - (double)idx;
+                    double w = u == 0 ? 1.0 : half * std::sin(PI * u) * std::sin(PI * u / half) / (PI * PI * u * u);
+                    acc += s.inst.data[(size_t)idx * 2 + c] * w;
+                }
+                dr.inst.data[i * 2 + c] = (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, acc)));
+            }
+        }
+        Run rd = run(dr, v), r30 = run(dr, settings_30());
+        double xd = snr(rd.out, s.vocal), x30 = snr(r30.out, s.vocal);
+        std::printf("        drift 300 ppm: v4 SNR %.1f dB, 3.0 %.1f dB\n", xd, x30);
+        expect(logged(rd, L"(resampled)"), "v4: drifting instrumental resampled");
+        expect(xd > 20 && xd > x30, "v4: drifting instrumental extracted");
         v.cntr_flag = v.lpf_flag = v.hpf_flag = true;
         expect(run(s, v).out.frames() == s.orig.frames(), "v4: filters + centralization");
     }
