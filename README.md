@@ -1,13 +1,22 @@
 # 歌声りっぷ (Utagoe Rip) 4
 
-The faithful 3.0 rebuild lives on, unchanged, at
-[FrasierGH/utagoe](https://github.com/FrasierGH/utagoe). This line adds a better
-separation: **Utagoe Rip 4**. It is on by default (Settings > Misc > *Improved
-extraction*); turning it off gives exactly the original's processing, as do files
-shorter than 8 seconds.
+**Utagoe Rip** is a Japanese freeware tool by TODAKEN (1999–2009) that
+extracts the **vocals** from a song when you also have its **instrumental /
+karaoke / off-vocal** version. It doesn't just phase-invert one waveform
+against the other. It subtracts the instrumental *per frequency bin* and drops
+every bin the instrumental explains, so small timing, level and phase
+differences between the two files don't leave the usual residue.
+
+The original Windows program has long been out of distribution.
+[FrasierGH/utagoe](https://github.com/FrasierGH/utagoe) brings it back as an
+open-source C++ rebuild of version 3.0. **Utagoe Rip 4** is that rebuild with a
+better separation, on by default (Settings > Misc > *Improved extraction*). Turned
+off, and for files shorter than 8 seconds, the processing is exactly the original's.
+
+## What's new in 4
 
 3.0 subtracts the karaoke at one level, and searches small block-by-block offsets.
-v4 additionally:
+Utagoe Rip 4 additionally:
 
 * **matches EQ differences** between the album and the karaoke release, per
   frequency band, and **level differences over time** when their dynamics differ
@@ -20,7 +29,7 @@ v4 additionally:
 It keeps 3.0's per-bin decision rule, so where both releases really are the same
 instrumental the result is about the same.
 
-| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | v4 |
+| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4 |
 |---|---:|---:|
 | Identical instrumental | 23.7 | 23.8 |
 | Karaoke at a different level | 23.5 | 25.3 |
@@ -33,36 +42,20 @@ instrumental the result is about the same.
 | Vinyl or tape wow | 18.1 | 20.0 |
 | Remaster + level + offset + drift + MP3 | 6.2 | 14.8 |
 
-MUSDB18-HQ test songs 11-50 (39 with a vocal in the excerpt), each release pair built
-from the song's stems; higher is better. On synthetic
-songs nothing was tuned on, the picture is the same. v4 is not better everywhere: see
-the limitations in [eval/README.md](eval/README.md#results) (one song loses 11 dB to
-wow; MP3 coding noise costs a little; v4 takes about three times as long).
+Measured on MUSDB18-HQ test songs 11-50 (39 with a vocal in the excerpt), each
+release pair built from the song's stems; higher is better. Synthetic songs give the
+same picture. Utagoe Rip 4 is not better everywhere: see the limitations in
+[eval/README.md](eval/README.md#results) (wow can still defeat the alignment on some
+songs; MP3 coding noise costs a little; it takes about three times as long).
 
-Everything about how this was measured, and how v4 works, is in
+How this was measured, and how the new separation works, is in
 [eval/README.md](eval/README.md). The separation is `src/engine/v4.cpp`; the Python
 prototype it was developed from is `eval/proto.py`, and the two give the same output
 (to -60 dB or better).
 
-**Still planned:** soft masking (fewer "watery" artifacts than keeping or deleting
-whole bins), multi-resolution analysis (sharper consonants and drums), more input
-formats (MP3/FLAC/AAC/24-bit, float output, mismatched sample rates), high-DPI
-support and workflow features (batch, A/B preview).
+## The rebuild of 3.0
 
----
-
-# 歌声りっぷ (Utagoe Rip)
-
-**Utagoe Rip** is a Japanese freeware tool by TODAKEN (1999–2009) that
-extracts the **vocals** from a song when you also have its **instrumental /
-karaoke / off-vocal** version. It doesn't just phase-invert one waveform
-against the other. It subtracts the instrumental *per frequency bin* and drops
-every bin the instrumental explains, so small timing, level and phase
-differences between the two files don't leave the usual residue.
-
-The original Windows program has long been out of distribution. This
-repository brings it back as an **open-source C++ rebuild of version 3.0**,
-reconstructed from a disassembly of the original:
+Reconstructed from a disassembly of the original:
 
 * **The same program.** The main window, Settings (all three tabs), Playback
   and About are replicas of the original's. They have the same layout,
@@ -70,18 +63,20 @@ reconstructed from a disassembly of the original:
   animation. In English mode every window matches DjLizard's en_US build pixel
   for pixel when the two run side by side on Windows 10. The layout matches
   the Japanese original as well.
-* **The same processing**: automatic analysis, alignment, spectral
-  subtraction, filters, and every option in the Settings dialog.
+* **The same processing** (with Utagoe Rip 4's separation turned off): automatic
+  analysis, alignment, spectral subtraction, filters, and every option in the
+  Settings dialog.
 * **Two languages.** On a Japanese Windows it looks exactly like TODAKEN's
   original. Anywhere else it is in English, following DjLizard's 2013 en_US
   build with the messages that build left in Japanese translated.
-* **One small file.** `utagoe.exe` is about 0.8 MB, like the original. It
+* **One small file.** `utagoe.exe` is under 1 MB, like the original. It
   needs no installation and no runtime DLLs, only Windows' own.
 
 ## Download
 
-Utagoe Rip 4 has no release yet: build it yourself (see below). The 3.0 rebuild
-is released at [FrasierGH/utagoe](https://github.com/FrasierGH/utagoe/releases).
+There is no release of Utagoe Rip 4 yet: build it yourself (see below). The
+plain 3.0 rebuild is released at
+[FrasierGH/utagoe](https://github.com/FrasierGH/utagoe/releases).
 Settings are kept in `%LOCALAPPDATA%\UtagoeRip\utagoe.ini`, shared with 3.0
 (Utagoe Rip 4 adds one key, `V4Engine`; saving settings in the 3.0 rebuild drops it,
 which turns Utagoe Rip 4's separation back on).

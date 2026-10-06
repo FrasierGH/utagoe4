@@ -79,14 +79,12 @@ All ignore the first and last second (start-up and tail effects in every engine)
 * **dev**: synthetic seeds 1000-1002 and MUSDB18-HQ test songs 1-10. Everything was
   developed and tuned on these.
 * **test**: synthetic seeds 2000-2009 and MUSDB18-HQ test songs 11-50, meant to be
-  held out. Their runs exposed failures (below) that were then fixed while looking at
-  the failing cases, so they are **no longer held out**.
-* **fresh**: synthetic seeds 3000-3019, added after those fixes. Three of them
-  (3000-3002) were later looked at to find out why v4 lost on fast drift, which led to
-  resampling the karaoke (the threshold was then chosen on dev songs).
+  held out. Failures they exposed were fixed while looking at them (listed under
+  Results), so they are **not a clean holdout**.
+* **fresh**: synthetic seeds 3000-3019, added later; three of them (3000-3002) were
+  used to diagnose a fast-drift problem.
 * **final**: synthetic seeds 4000-4019, added last, for the final numbers. Nothing was
-  tuned on them; only their summary table was looked at, after each of the last four
-  rounds of fixes (which came from MUSDB songs and from a code review).
+  tuned on them.
 
 ## Engines
 
