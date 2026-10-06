@@ -74,8 +74,8 @@ Reconstructed from a disassembly of the original:
 
 ## Download
 
-There is no release of Utagoe Rip 4 yet: build it yourself (see below). The
-plain 3.0 rebuild is released at
+Get `utagoe.exe` from the [Releases](../../releases) page and run it, or build it
+yourself (see below). The plain 3.0 rebuild is released at
 [FrasierGH/utagoe](https://github.com/FrasierGH/utagoe/releases).
 Settings are kept in `%LOCALAPPDATA%\UtagoeRip\utagoe.ini`, shared with 3.0
 (Utagoe Rip 4 adds one key, `V4Engine`; saving settings in the 3.0 rebuild drops it,
