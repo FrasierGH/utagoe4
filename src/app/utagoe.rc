@@ -29,8 +29,8 @@ HELP_EN RCDATA "../../res/UtagoeHelp.html"
 HELP_JA RCDATA "../../res/UtagoeHelp_ja.pdf"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 4,0,0,0
- PRODUCTVERSION 4,0,0,0
+ FILEVERSION 4,1,0,0
+ PRODUCTVERSION 4,1,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -43,12 +43,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", ""
             VALUE "FileDescription", "歌声りっぷ"
-            VALUE "FileVersion", "4.0.0.0"
+            VALUE "FileVersion", "4.1.0.0"
             VALUE "InternalName", "utagoe"
             VALUE "LegalCopyright", "Copyright (C) 1999-2009  TODAKEN / port: MIT License"
             VALUE "OriginalFilename", "utagoe.exe"
             VALUE "ProductName", "歌声りっぷ"
-            VALUE "ProductVersion", "4.0.0.0"
+            VALUE "ProductVersion", "4.1.0.0"
             VALUE "Comments", "Utagoe Rip 4: the open-source rebuild of Utagoe Rip 3.0 with an improved separation"
         END
     END

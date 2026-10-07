@@ -26,32 +26,39 @@ Utagoe Rip 4 additionally:
 * **finds the offset (up to 30 s either way) and polarity itself**, telling the true
   lag from a repeat a few bars away in loop-based music.
 
-It keeps 3.0's per-bin decision rule, so where both releases really are the same
-instrumental the result is about the same.
+and, since 4.1:
 
-| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4 |
-|---|---:|---:|
-| Identical instrumental | 23.7 | 23.8 |
-| Karaoke at a different level | 23.5 | 25.3 |
-| Album EQ'd for mastering | 5.5 | 22.6 |
-| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 |
-| Both mastered, each with its own dynamics | 17.4 | 19.3 |
-| Karaoke from a different master | 7.1 | 17.8 |
-| Fractional-sample offset | 22.3 | 23.8 |
-| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 |
-| Vinyl or tape wow | 18.1 | 20.0 |
-| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 |
+* **subtracts instead of deleting.** 3.0 keeps or deletes every time-frequency bin,
+  and deletes the vocal along with the instrumental wherever the instrumental is
+  louder. 4.1 subtracts, and only fades out what its own measure of the match says is
+  leftover instrumental, so where the releases match it keeps nearly all of the vocal;
+* **estimates the EQ difference robustly**, unbiased by the vocal.
+
+| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4.0 | 4.1 |
+|---|---:|---:|---:|
+| Identical instrumental | 23.7 | 23.8 | 49.7 |
+| Karaoke at a different level | 23.5 | 25.3 | 49.6 |
+| Karaoke with inverted polarity | 23.7 | 23.8 | 47.0 |
+| Album EQ'd for mastering | 5.5 | 22.6 | 31.1 |
+| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 | 12.7 |
+| Both mastered, each with its own dynamics | 17.4 | 19.3 | 20.2 |
+| Karaoke from a different master | 7.1 | 17.8 | 18.3 |
+| Fractional-sample offset | 22.3 | 23.8 | 48.7 |
+| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 | 45.0 / 42.8 |
+| Vinyl or tape wow | 18.1 | 20.0 | 21.7 |
+| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 | 15.1 |
 
 Measured on MUSDB18-HQ test songs 11-50 (39 with a vocal in the excerpt), each
-release pair built from the song's stems; higher is better. Synthetic songs give the
-same picture. Utagoe Rip 4 is not better everywhere: see the limitations in
-[eval/README.md](eval/README.md#results) (wow can still defeat the alignment on some
-songs; MP3 coding noise costs a little; it takes about three times as long).
+release pair built from the song's stems; higher is better (each 10 dB is a tenth of
+the error energy). Synthetic songs give the same picture. Utagoe Rip 4 is not better everywhere:
+see the limitations in [eval/README.md](eval/README.md#results) (wow can still defeat
+the alignment on some songs; with MP3 files it leaves a little more coding noise in the
+vocal's pauses than 3.0; it takes about three times as long).
 
 How this was measured, and how the new separation works, is in
 [eval/README.md](eval/README.md). The separation is `src/engine/v4.cpp`; the Python
 prototype it was developed from is `eval/proto.py`, and the two give the same output
-(to -60 dB or better).
+(to -55 dB or better).
 
 ## The rebuild of 3.0
 
@@ -163,7 +170,7 @@ the settings and the INI format. `engine_test ORIGINAL INSTRUMENTAL OUTPUT
 [Key=Value ...]` processes files from the command line with 3.0's processing
 (`V4Engine=1` for v4) and prints the analysis log. `v4_cli ORIGINAL INSTRUMENTAL
 OUTPUT` runs the v4 separation alone and prints what it found (offset,
-polarity, drift, level tracking). The benchmark against 3.0 is in `eval/` (Python).
+polarity, drift, level tracking); `--hard` runs it as 4.0 did. The benchmark against 3.0 is in `eval/` (Python).
 
 ### Releasing
 

@@ -11,7 +11,9 @@
 Settings may only be tuned on the dev set; results are reported on the test set.
 
 Engines: "3.0" is the real Utagoe Rip 3.0 engine (tests/engine_test, default
-settings); "v4-cpp" is the C++ port of v4 (tests/v4_cli); "ceiling" is the best
+settings); "v4-cpp" is the C++ separation as the program runs it (tests/v4_cli: 4.1),
+"v40-cpp" the same with 4.0's EQ passes and 3.0's keep-or-delete rule (v4_cli --hard);
+"ceiling" is the best
 achievable output where the target is approximate (MP3); the rest are prototypes
 from proto.ENGINES. Cases and scores are cached in
 eval/work/ under a hash of the code and settings that produced them (outputs are
@@ -46,11 +48,13 @@ WORK = os.path.join(HERE, 'work')
 RATE = 44100
 
 # 'fresh' was added after fixes prompted by failures in 'test'; three of its songs were
-# then looked at while diagnosing fast drift. 'final' was added last, untouched by any
-# choice.
+# then looked at while diagnosing fast drift. 'final' was added for 4.0's final numbers,
+# 'final41' for 4.1's (and scored after each of 4.1's last revisions); 'holdout41' was
+# added after them and scored once. Nothing was tuned on any of these.
 SYNTH_SEEDS = {'dev': range(1000, 1003), 'test': range(2000, 2010), 'fresh': range(3000, 3020),
-               'final': range(4000, 4020)}
-STEMS_SPLIT = {'dev': slice(0, 10), 'test': slice(10, None), 'fresh': slice(0, 0), 'final': slice(0, 0)}
+               'final': range(4000, 4020), 'final41': range(5000, 5020), 'holdout41': range(6000, 6020)}
+STEMS_SPLIT = {'dev': slice(0, 10), 'test': slice(10, None), 'fresh': slice(0, 0), 'final': slice(0, 0),
+               'final41': slice(0, 0), 'holdout41': slice(0, 0)}
 
 
 def _hash(*parts):
@@ -150,13 +154,17 @@ def engine_version(name):
             return _hash(f.read())
     if name == 'ceiling':
         return 'case'
-    if name == 'v4-cpp':
+    if name in CPP_ARGS:
         exe = find_exe('v4_cli')
         if not exe:
             raise SystemExit('build the C++ v4 first: cmake --build build --config Release --target v4_cli')
         with open(exe, 'rb') as f:
-            return _hash(f.read())
+            return _hash(f.read(), CPP_ARGS[name])
     return _hash(_src('proto.py'), sorted(proto.ENGINES[name].items()))
+
+
+# the C++ separation's configurations (tests/v4_cli arguments)
+CPP_ARGS = {'v4-cpp': [], 'v40-cpp': ['--hard']}
 
 
 def run_engine(name, case):
@@ -165,11 +173,11 @@ def run_engine(name, case):
         if not os.path.exists(case['ceiling']):
             return None
         return sf.read(case['ceiling'], always_2d=True)[0]
-    if name in ('3.0', 'v4-cpp'):
+    if name == '3.0' or name in CPP_ARGS:
         exe = find_baseline() if name == '3.0' else find_exe('v4_cli')
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, 'out.wav')
-            subprocess.run([exe, case['mix'], case['kar'], out], check=True, capture_output=True)
+            subprocess.run([exe, case['mix'], case['kar'], out] + CPP_ARGS.get(name, []), check=True, capture_output=True)
             return sf.read(out, always_2d=True)[0]
     mix, _ = sf.read(case['mix'], always_2d=True)
     kar, _ = sf.read(case['kar'], always_2d=True)
@@ -305,7 +313,7 @@ def main():
     if args.prune:
         # every engine's current version, for both kinds of songs
         keep = {f'{t}-{_hash(_src("degrade.py"), _src("synth.py"), args.seconds, args.start, t)}' for t in ('synth', 'stems')}
-        keep |= {f'{en}-{engine_version(en)}' for en in ['3.0', 'ceiling', 'v4-cpp'] + list(proto.ENGINES)}
+        keep |= {f'{en}-{engine_version(en)}' for en in ['3.0', 'ceiling'] + list(CPP_ARGS) + list(proto.ENGINES)}
         prune(keep)
         return
 

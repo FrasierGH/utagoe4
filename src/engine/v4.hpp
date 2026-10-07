@@ -16,6 +16,10 @@ struct Options {
     double octave = 1.0 / 3;  // EQ smoothing
     int level_track = 2;      // 0 off, 1 always, 2 auto (when it holds up out of sample)
     double lvl_gain = 0.13;   // auto: estimated on even bins, must cut the odd bins' residual this much
+    bool huber = true;        // EQ by Huber-weighted least squares (4.1); false: 4.0's two passes
+    int huber_iters = 2;
+    bool soft = true;         // soft decision per cell (4.1); false: 3.0's keep-or-delete rule
+    double const_lag = 0.1;   // a fitted drift under this many samples counts as none (4.1; 4.0: 0)
 };
 
 struct Report {
@@ -27,6 +31,7 @@ struct Report {
     bool level_applied = false;
     double stretch = 0;        // typical lag change across one frame, samples
     bool resampled = false;    // the karaoke was resampled along the lag curve (stretch > 0.6)
+    double soft_q = 0;         // soft decision: the quantile the model error was read at (0: hard rule)
 };
 
 // mix and kar: planar, the same number of channels (1 or 2), samples in [-1, 1].

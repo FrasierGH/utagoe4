@@ -1,4 +1,4 @@
-// v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction]
+// v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard]
 //
 // Runs the Utagoe Rip 4 separation (src/engine/v4.cpp) on 16-bit WAV files and prints
 // what the alignment found. eval/run.py uses it as engine "v4-cpp" to score the C++
@@ -22,7 +22,7 @@ using namespace utagoe;
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 4) {
-        std::fprintf(stderr, "usage: v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction]\n");
+        std::fprintf(stderr, "usage: v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard]\n");
         return 1;
     }
     v4::Options opt;
@@ -34,6 +34,9 @@ int wmain(int argc, wchar_t** argv) {
             opt.kvol = _wtof(argv[++i]);
         } else if (!wcscmp(argv[i], L"--extraction")) {
             opt.quality = false;
+        } else if (!wcscmp(argv[i], L"--hard")) {  // Utagoe Rip 4.0: 4.0's EQ passes and 3.0's rule
+            opt.huber = opt.soft = false;
+            opt.const_lag = 0.0;
         }
     }
     Audio orig, kar;
@@ -54,9 +57,9 @@ int wmain(int argc, wchar_t** argv) {
     v4::Report rep;
     auto y = v4::separate(planar(orig), planar(kar), orig.rate, opt, &rep);
     std::printf("lag %ld sign %d drift_line %d lag_start %.3f lag_end %.3f stretch %.3f resampled %d "
-                "level_gain %.3f level_applied %d\n",
+                "level_gain %.3f level_applied %d soft_q %.2f\n",
                 rep.lag, rep.sign, (int)rep.drift_line, rep.lag_start, rep.lag_end, rep.stretch, (int)rep.resampled,
-                rep.level_gain, (int)rep.level_applied);
+                rep.level_gain, (int)rep.level_applied, rep.soft_q);
     Audio out;
     out.rate = orig.rate;
     out.channels = orig.channels;

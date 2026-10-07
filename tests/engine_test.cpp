@@ -209,7 +209,7 @@ int self_test() {
         expect(r.out.frames() == s.orig.frames(), "v4: output length = original length");
         double x = snr(r.out, s.vocal);
         std::printf("        v4 SNR %.1f dB\n", x);
-        expect(x > 25, "v4 recovers the vocal");
+        expect(x > 50, "v4 recovers the vocal (an exact match subtracts, keeping the vocal whole)");
         Song inv = s;
         for (auto& q : inv.inst.data) q = (int16_t)std::max(-32768, std::min(32767, -(int)q));
         Run ri = run(inv, v);

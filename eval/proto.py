@@ -232,7 +232,7 @@ def track_lags(mix, kar, rate, lag0, win_sec=2.0, hop_sec=1.0, search=64, search
 MIN_WEIGHT = 0.5    # windows below this fraction of the median peak are not fitted
 
 
-def fit_lag_curve(centres, lags, weights, at, sigma_sec=1.5, rate=44100):
+def fit_lag_curve(centres, lags, weights, at, sigma_sec=1.5, rate=44100, const_lag=0.0):
     """The lag at positions `at` (samples). Outliers (more than 2 samples from a
     running median) are dropped. A straight line (clock drift) is used when it fits
     to within 0.2 samples; otherwise a Gaussian-weighted local-linear fit with
@@ -262,6 +262,17 @@ def fit_lag_curve(centres, lags, weights, at, sigma_sec=1.5, rate=44100):
     c, w, y = centres[keep], weights[keep], lags[keep]
     line = np.polyfit(c, y, 1, w=np.sqrt(w))
     if np.median(np.abs(np.polyval(line, c) - y)) < 0.2:
+        span = c.max() - c.min()
+        sw = np.sum(w)
+        cm = np.sum(w * c) / sw
+        s_r = np.sqrt(np.sum(w * (np.polyval(line, c) - y) ** 2) / sw)
+        s_c = np.sqrt(np.sum(w * (c - cm) ** 2) / sw)
+        se_drift = s_r / (s_c * np.sqrt(max(len(c) - 2, 1)) + 1e-30) * span
+        if const_lag and abs(line[0] * span) < max(const_lag, 3 * se_drift):
+            # no drift to speak of (identical clocks): a constant, without the slope's noise.
+            # Under 3 standard errors also counts: an EQ difference biases each window's
+            # fraction by an amount that follows the music, which can fake a small drift
+            return np.full(len(at), float(np.sum(w * y) / np.sum(w))), True
         return np.polyval(line, at), True
     s = sigma_sec * rate
     out = np.empty(len(at))
@@ -408,7 +419,7 @@ def pick_tracked(mix, kar, rate, top_windows=4, excerpt_sec=60.0, same=512, max_
     return int(round(lag)), 1.0 if g >= 0 else -1.0, mid
 
 
-def align_frames(mix, kar, A, rate, lag0, seed=None, keep_line=0.75, cap=1.2):
+def align_frames(mix, kar, A, rate, lag0, seed=None, keep_line=0.75, cap=1.2, const_lag=0.0):
     """The lag of kar against mix for every STFT frame: two passes of coarse windows,
     then, unless they fit a straight line (offset plus clock drift) that the first
     per-frame refinement confirms, two per-frame refinements (low band first,
@@ -416,14 +427,14 @@ def align_frames(mix, kar, A, rate, lag0, seed=None, keep_line=0.75, cap=1.2):
     n_frames = A.shape[2]
     centres = np.arange(n_frames) * HOP
     t = np.arange(len(mix), dtype=float)
-    lag, is_line = fit_lag_curve(*track_lags(mix, kar, rate, lag0, seed=seed), centres, rate=rate)
+    lag, is_line = fit_lag_curve(*track_lags(mix, kar, rate, lag0, seed=seed), centres, rate=rate, const_lag=const_lag)
     # second coarse pass on the karaoke read along the first curve: what is left is
     # nearly constant, so a fast drift no longer smears each window's estimate
     # The second pass measures accurately but the first curve can carry a sawtooth, so
     # the final curve is fitted to the second pass's absolute lags, not added on top
     k1 = frac_read(kar, t + np.interp(t, centres, lag))
     c2, r2, w2 = track_lags(mix, k1, rate, 0, search=16, search0=16)
-    lag, is_line = fit_lag_curve(c2, np.interp(c2, centres, lag) + r2, w2, centres, rate=rate)
+    lag, is_line = fit_lag_curve(c2, np.interp(c2, centres, lag) + r2, w2, centres, rate=rate, const_lag=const_lag)
     # A wobble faster than the windows (a 33 rpm record: 1.8 s) averages out in them and
     # can pass for a straight line, so the first per-frame refinement always runs; the
     # line is kept when that finds nothing (median correction under `keep_line`)
@@ -434,10 +445,10 @@ def align_frames(mix, kar, A, rate, lag0, seed=None, keep_line=0.75, cap=1.2):
     d1 = refine_frames(A, _eq_phase(A, _stft_along(kar, lag), rate, cap) * _stft_along(kar, lag), rate, 2000.0)
     inner = d1[40:-40] if len(d1) > 100 else d1
     if is_line and np.median(np.abs(inner)) < keep_line:
-        return lag
+        return lag, True
     lag = lag + d1
     B = _stft_along(kar, lag)
-    return lag + refine_frames(A, _eq_phase(A, B, rate, cap) * B, rate, 6000.0)
+    return lag + refine_frames(A, _eq_phase(A, B, rate, cap) * B, rate, 6000.0), False
 
 
 def _eq_phase(A, B, rate, cap):
@@ -479,7 +490,93 @@ def _thr(kvol):
     return kvol * np.maximum(ramp, 0.15)
 
 
-def _estimate_h(A, B, g, cap, octave, passes, mag):
+# per-bin medians of |A - H B| come from a histogram of log10 |r| (as the C++ engine
+# streams them): 0.02 decade bins
+HUBER_BINS = np.linspace(-12.0, 2.0, 701)
+
+
+def _hist_median(r):
+    """Median along the last axis from the HUBER_BINS histogram (upper bin edge)."""
+    lr = np.clip(np.log10(r + 1e-300), HUBER_BINS[0], HUBER_BINS[-1] - 1e-9)
+    idx = np.searchsorted(HUBER_BINS, lr, side='right') - 1                # (ch, bins, frames)
+    nh = len(HUBER_BINS) - 1
+    flat = idx + nh * np.arange(idx.shape[0] * idx.shape[1]).reshape(idx.shape[0], idx.shape[1], 1)
+    h = np.bincount(flat.ravel(), minlength=idx.shape[0] * idx.shape[1] * nh).reshape(idx.shape[0], idx.shape[1], nh)
+    cdf = np.cumsum(h, axis=2)
+    k = np.argmax(cdf >= (r.shape[2] + 1) // 2, axis=2)                     # the first bin holding the median
+    return 10 ** HUBER_BINS[k + 1]
+
+
+def _estimate_h_huber(A, B, octave, iters=4, k=1.5):
+    """Complex gain per bin by iteratively reweighted least squares with Huber weights:
+    cells whose residual |A - H B| is well above the bin's median (the vocal) count less,
+    so the estimate is neither pulled by the vocal nor truncated by a cell selection."""
+    H = _smooth_bins(np.sum(A * np.conj(B), axis=2), octave) / (_smooth_bins(np.sum(np.abs(B) ** 2, axis=2), octave) + 1e-20)
+    for _ in range(iters):
+        r = np.abs(A - H[:, :, None] * B)
+        delta = k * _hist_median(r)[:, :, None]
+        w = np.minimum(1.0, delta / (r + 1e-30))
+        H = _smooth_bins(np.sum(w * A * np.conj(B), axis=2), octave) / (_smooth_bins(np.sum(w * np.abs(B) ** 2, axis=2), octave) + 1e-20)
+    return H
+
+
+# Soft decision: bands of 1/3 octave (below 50 Hz one band) in which the model error is
+# measured, and the histogram of log10 |A - I|^2 / |I|^2 it is read from
+SOFT_BINS = np.linspace(-8.0, 4.0, 1201)
+
+
+def _soft_bands(nb, rate):
+    f = np.arange(nb) * rate / N
+    edges = [0.0, 50.0]
+    while edges[-1] * 2 ** (1 / 3) < rate / 2:
+        edges.append(edges[-1] * 2 ** (1 / 3))
+    band = np.clip(np.searchsorted(edges, f, side='right') - 1, 0, len(edges) - 1)
+    return band, len(edges)
+
+
+def lossy(X, rate, lo=11000.0, hi=20500.0, step=250.0, width=1000.0, drop_db=20.0):
+    """A lossy coder's low-pass: somewhere between `lo` and `hi`, the mean spectrum (all
+    channels and frames) drops by more than `drop_db` within `width`. Natural roll-offs
+    and anti-alias filters near Nyquist are gentler or higher."""
+    p = np.mean(np.abs(X) ** 2, axis=(0, 2))
+    f = np.arange(len(p)) * rate / N
+    edges = np.arange(lo, min(hi, rate / 2) + 1e-9, step)
+    lvl = np.array([10 * np.log10(np.mean(p[(f >= e) & (f < e + step)]) + 1e-30) for e in edges])
+    k = int(round(width / step))
+    return len(lvl) > k and float(np.max(lvl[:-k] - lvl[k:])) > drop_db
+
+
+def _soft_gain(A, I, cap, q, strength, rate):
+    """max(0, 1 - strength rho |I|^2 / |A - I|^2) per cell: rho is the model error, the
+    q-quantile of |A - I|^2 / |I|^2 over the cells the instrumental dominates, per band
+    (one value per band). An exact model (rho -> 0) subtracts and keeps
+    everything; a poor one suppresses cells where the residual is mostly model error."""
+    pi, pv = np.abs(I) ** 2, np.abs(A - I) ** 2
+    dom = np.abs(I) * cap > np.abs(A)
+    band, nbands = _soft_bands(A.shape[1], rate)
+    lr = np.log10(pv / (pi + 1e-30) + 1e-30)
+    rho = np.ones((A.shape[0], nbands))
+    valid = np.zeros((A.shape[0], nbands), dtype=bool)
+    for c in range(A.shape[0]):
+        for b in range(nbands):
+            sel = dom[c][band == b]
+            v = lr[c][band == b][sel]
+            if v.size < 50:
+                continue
+            h, _ = np.histogram(np.clip(v, SOFT_BINS[0], SOFT_BINS[-1] - 1e-9), SOFT_BINS)
+            cdf = np.cumsum(h) / h.sum()
+            i = int(np.searchsorted(cdf, q))
+            rho[c, b] = 10 ** SOFT_BINS[i + 1]
+            valid[c, b] = True
+    # per bin: the band's value (bands with too few cells take the next band down's)
+    for b in range(1, nbands):
+        rho[:, b] = np.where(valid[:, b], rho[:, b], rho[:, b - 1])
+        valid[:, b] |= valid[:, b - 1]
+    rb = rho[:, band][:, :, None]
+    return np.clip(1 - strength * rb * pi / (pv + 1e-30), 0.0, 1.0)
+
+
+def _estimate_h(A, B, g, cap, octave, passes, mag, iters=4):
     """Complex gain per bin, (ch, bins).
 
     passes=1, mag='regress': least squares sum A conj(B) / sum |B|^2 over all cells
@@ -487,6 +584,8 @@ def _estimate_h(A, B, g, cap, octave, passes, mag):
     passes=2: re-estimate from the cells the first estimate says the instrumental
     dominates. That selection truncates A, which biases least squares low; mag='power'
     takes |H| from the power ratio of those cells instead (and keeps the phase)."""
+    if mag == 'huber':
+        return _estimate_h_huber(A, B, octave, iters)
     H = np.full(A.shape[:2], g, dtype=complex)
     w = np.ones(A.shape, dtype=bool)
     for p in range(passes):
@@ -572,10 +671,11 @@ def stretch(frame_lag):
 
 
 def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.2, quality=True,
-             octave=1 / 3, passes=2, mag='power', align='global', lvl_gain=0.13):
+             octave=1 / 3, passes=2, mag='power', align='global', lvl_gain=0.13, decision='hard', soft_q=0.5,
+             huber_iters=4, soft_q_lo=0.10, const_lag=0.0):
     """Returns the vocal estimate (same shape as mix)."""
     n = len(mix)
-    if n == 0 or len(kar) == 0:                                   # nothing to align
+    if n == 0 or len(kar) == 0 or not np.any(kar):                # nothing to align
         return mix.copy()
     kar = kar[:n + int(MAX_LAG_SEC * rate) + N]                  # beyond the lag search
     seed = None
@@ -589,7 +689,8 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
         k = shift(np.pad(kar, ((0, max(0, n - len(kar))), (0, 0)))[:n], lag0)
         B = _stft(k)
     elif align == 'track':
-        frame_lag = align_frames(mix, kar, A, rate, lag0, seed, cap=min(kvol, 1.5) if quality else kvol)
+        frame_lag, is_line = align_frames(mix, kar, A, rate, lag0, seed, cap=min(kvol, 1.5) if quality else kvol,
+                                          const_lag=const_lag)
         pos = np.arange(n) + np.interp(np.arange(n), np.arange(len(frame_lag)) * HOP, frame_lag)
         if stretch(frame_lag) > MAX_STRETCH:
             # the lag moves within a frame (fast drift, wow), so a frame cut at one lag is
@@ -609,18 +710,38 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
         mag_i = np.abs(I) if kill == 'scaled' else np.abs(B)      # 3.0 tests the raw instrumental
     elif eq == 'perbin':
         oct_ = _choose_eq(A, B, g, cap, passes, mag) if octave == 'cv' else octave
-        I = _estimate_h(A, B, g, cap, oct_, passes, mag)[:, :, None] * B
+        I = _estimate_h(A, B, g, cap, oct_, passes, mag, huber_iters)[:, :, None] * B
         mag_i = np.abs(I)
     else:
         raise ValueError(eq)
 
+    level_applied = False
     if track:
         c = _level_track(A, I, cap)
         if track != 'auto' or _level_gain(A, I, cap, _level_track(A, I, cap, bins=slice(0, None, 2))) > lvl_gain:
             I = I * c[:, None, :]
             mag_i = np.abs(I)
+            level_applied = True
 
     V = A - I
+    if decision == 'soft':
+        # Extractable Level scales how hard the model error is suppressed (1 at 3.0's
+        # default 1.2); Extraction Priority doubles it
+        strength = kvol / 1.2 * (1.0 if quality else 2.0)
+        if soft_q == 'gated':
+            # The model error is read off a quantile of |A - I|^2 / |I|^2 in the cells the
+            # instrumental dominates, which still hold some vocal. Where the model can be
+            # exact (no dynamics difference, a lag that is a line) a low quantile finds the
+            # model error under the vocal; where the releases' dynamics differ or the lag
+            # wobbles, the error is larger and spread, and the median measures it better.
+            line = align != 'track' or is_line
+            # Lossy coding (a coder's low-pass in either file) leaves coding noise that
+            # differs between the two files: the model cannot be exact either
+            coded = lossy(A, rate) or lossy(B, rate)
+            q = 0.5 if (level_applied or not line or coded) else soft_q_lo
+        else:
+            q = soft_q
+        return _istft(V * _soft_gain(A, I, cap, q, strength, rate), n)
     kill_mask = mag_i * cap > np.abs(A)
     if quality:
         kill_mask &= _phase_diff(A, I) < _thr(kvol)[None, :, None]
@@ -641,8 +762,12 @@ ENGINES = {
     # + per-frame level tracking (compression), always or only when it varies enough
     'proto-eq-align-lvl': dict(eq='perbin', align='track', track=True),
     'proto-eq-align-auto': dict(eq='perbin', align='track', track='auto'),
-    # the configuration chosen on the dev set (identical to proto-eq-align-auto)
+    # Utagoe Rip 4.0 (identical to proto-eq-align-auto)
     'v4': dict(eq='perbin', align='track', track='auto'),
+    # 4.1: EQ by Huber-weighted least squares, and a soft decision per cell instead of
+    # 3.0's keep-or-delete rule
+    'v41': dict(eq='perbin', align='track', track='auto', mag='huber', huber_iters=2, decision='soft', soft_q='gated',
+                soft_q_lo=0.10, const_lag=0.1),
     # tried: the EQ model chosen per song out of sample (1/3 octave, 1 octave or one
     # gain). No difference on the dev set, so not part of v4
     'v4-cv': dict(eq='perbin', align='track', track='auto', octave='cv'),

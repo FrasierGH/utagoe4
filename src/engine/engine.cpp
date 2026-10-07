@@ -736,9 +736,10 @@ Audio UtagoeRip::run_v4() {
         return empty;
     }
     wchar_t line[256];
-    swprintf(line, 256, L"v4 lag:%ld sign:%d drift:%ls start:%.2f end:%.2f stretch:%.2f%ls level:%ls gain:%.3f",
+    swprintf(line, 256, L"v4 lag:%ld sign:%d drift:%ls start:%.2f end:%.2f stretch:%.2f%ls level:%ls gain:%.3f soft:%.2f",
              rep.lag, rep.sign, rep.drift_line ? L"line" : L"tracked", rep.lag_start, rep.lag_end, rep.stretch,
-             rep.resampled ? L" (resampled)" : L"", rep.level_applied ? L"tracked" : L"fixed", rep.level_gain);
+             rep.resampled ? L" (resampled)" : L"", rep.level_applied ? L"tracked" : L"fixed", rep.level_gain,
+             rep.soft_q);
     log(line);
     std::vector<double> x[2];
     for (int c = 0; c < ch_; c++) {

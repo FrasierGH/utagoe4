@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(utagoe VERSION 4.0.0 LANGUAGES CXX RC)
+project(utagoe VERSION 4.1.0 LANGUAGES CXX RC)
 
 if(NOT WIN32)
   message(FATAL_ERROR "Utagoe Rip is a Windows program")
