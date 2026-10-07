@@ -29,7 +29,9 @@ long PlayForm::status_value(const wchar_t* item) {
 
 void PlayForm::run() {
     alias_ = ui::format(L"utagoe%d", ++alias_counter);
-    if (!mci(L"open \"" + path_ + L"\" type waveaudio alias " + alias_)) return;
+    // WAV through the wave device, other formats through DirectShow (what Windows can play)
+    bool wav = path_.size() >= 4 && !_wcsicmp(path_.c_str() + path_.size() - 4, L".wav");
+    if (!mci(L"open \"" + path_ + L"\" type " + (wav ? L"waveaudio" : L"mpegvideo") + L" alias " + alias_)) return;
     mci(L"set " + alias_ + L" time format milliseconds");
     length_ = status_value(L"length");
     font = main_->font;

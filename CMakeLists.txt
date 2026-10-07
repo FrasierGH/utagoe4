@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(utagoe VERSION 4.1.0 LANGUAGES CXX RC)
+project(utagoe VERSION 4.2.0 LANGUAGES CXX RC)
 
 if(NOT WIN32)
   message(FATAL_ERROR "Utagoe Rip is a Windows program")
@@ -27,8 +27,11 @@ add_library(utagoe_engine STATIC
   src/engine/wav.cpp
   src/engine/dsp.cpp
   src/engine/engine.cpp
-  src/engine/v4.cpp)
+  src/engine/v4.cpp
+  src/engine/audio_io.cpp)
 target_include_directories(utagoe_engine PUBLIC src)
+# Media Foundation decodes the formats other than WAV (audio_io.cpp)
+target_link_libraries(utagoe_engine PUBLIC mfplat mfreadwrite mfuuid ole32)
 
 # --- tests (ctest)
 enable_testing()

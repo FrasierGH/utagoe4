@@ -66,6 +66,7 @@ private:
     bool busy_ = false, debug_ = false, close_pending_ = false;
     std::atomic<bool> cancel_{false};
     std::thread worker_;
+    std::wstring read_failed_;  // the input the worker could not decode
     AnalysisCache cache_;
     FILE* log_ = nullptr;
     DWORD log_start_ = 0;

@@ -1,8 +1,8 @@
 // v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard]
 //
-// Runs the Utagoe Rip 4 separation (src/engine/v4.cpp) on 16-bit WAV files and prints
-// what the alignment found. eval/run.py uses it as engine "v4-cpp" to score the C++
-// port against the Python prototype.
+// Runs the Utagoe Rip 4 separation (src/engine/v4.cpp) on two audio files (any format
+// the program reads) and prints what the alignment found. eval/run.py uses it as engine
+// "v4-cpp" to score the C++ port against the Python prototype.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -15,6 +15,7 @@
 #include <cwchar>
 #include <vector>
 
+#include "engine/audio_io.hpp"
 #include "engine/v4.hpp"
 #include "engine/wav.hpp"
 
@@ -40,12 +41,9 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     Audio orig, kar;
-    if (!read_wav(argv[1], &orig) || !read_wav(argv[2], &kar)) {
-        std::fprintf(stderr, "cannot read input (16-bit PCM WAV)\n");
-        return 2;
-    }
-    if (orig.channels != kar.channels || orig.rate != kar.rate) {
-        std::fprintf(stderr, "sample rate and channel count must match\n");
+    // any supported format; the karaoke at the original's rate and channel count
+    if (!load_audio(argv[1], 0, 0, &orig) || !load_audio(argv[2], orig.rate, orig.channels, &kar)) {
+        std::fprintf(stderr, "cannot read input\n");
         return 2;
     }
     auto planar = [](const Audio& a) {

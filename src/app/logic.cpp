@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include "engine/audio_io.hpp"
+
 #include <algorithm>
 #include <climits>
 #include <vector>
@@ -53,6 +55,18 @@ std::vector<Cand> find(const std::wstring& dir, const std::wstring& pattern, lon
     return out;
 }
 
+// find() over every audio extension the program reads (4.2; the original looked for
+// *.wav only). One file can match two patterns (*.wav also finds .wave), so names are
+// kept once.
+std::vector<Cand> find_audio(const std::wstring& dir, const std::wstring& pat, long long ref_size) {
+    std::vector<Cand> out;
+    for (const wchar_t* const* e = AUDIO_EXTENSIONS; *e; e++)
+        for (Cand& c : find(dir, pat + L"*" + *e, ref_size))
+            if (std::none_of(out.begin(), out.end(), [&](const Cand& o) { return same(o.name, c.name); }))
+                out.push_back(c);
+    return out;
+}
+
 // 0x406820: prefer a keyword match, then the closest file size.
 std::wstring select(std::vector<Cand> cands, const std::wstring& orig_name, const std::wstring& exclude, bool vname_flg) {
     std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
@@ -101,14 +115,14 @@ void auto_names(const std::wstring& path, bool kname_flg, bool vname_flg, const 
 
     std::wstring out_name = base + sep + rest;
     std::wstring out_path = dir + out_name;
-    std::wstring found = select(find(dir, pat + L"*.wav", ref), name, out_name, vname_flg);
+    std::wstring found = select(find_audio(dir, pat, ref), name, out_name, vname_flg);
     if (found.empty()) {
         std::wstring b = base, p = pat;
         for (size_t n = base.size(); n > 1; n--) {  // drop characters from the end
             b.pop_back();
             p.pop_back();
             std::wstring xname = (!sep.empty() && b.back() == sep[0]) ? b + rest : b + sep + rest;
-            found = select(find(dir, p + L"*.wav", ref), name, xname, vname_flg);
+            found = select(find_audio(dir, p, ref), name, xname, vname_flg);
             if (!found.empty()) {
                 out_path = dir + xname;
                 break;

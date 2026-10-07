@@ -7,9 +7,9 @@ namespace utagoe {
 const Lang LANG_EN = {
     false, L"Tahoma", DEFAULT_CHARSET,
     L"Warning", L"Confirm", L"OK", L"Cancel", L"WAVE file (*.wav)", L"All files (*.*)",
-    L"Input .WAV File (Original)", L"Input .WAV File (Instrumental)", L"Output .WAV File (Vocal)",
+    L"Input File (Original)", L"Input File (Instrumental)", L"Output .WAV File (Vocal)",
     L"Start", L"Abort", L"Quit", L"Settings...", L"Help...", L"Version Info",
-    L"Please drop a WAVE file.",
+    L"Please drop an audio file.",
     L"\"%ls\"\nThe file could not be opened.",
     L"\"%ls\"\nThis file format is not supported,\nor the file is damaged.",
     L"\"%ls\"\nThis WAVE file format is not supported.",
@@ -50,14 +50,15 @@ const Lang LANG_EN = {
     L"Utagoe Rip 4", L"Improved extraction (recommended)",
     L"Matches EQ and level differences between the two releases, follows timing drift and speed "
     L"wobble, and detects inverted polarity. The settings it takes care of itself are greyed out.",
+    L"Audio files", L"%.3fkHz %ls %ls", L"%d channels",
 };
 
 const Lang LANG_JA = {
     true, L"ＭＳ Ｐゴシック", SHIFTJIS_CHARSET,
     L"警告", L"確認", L"OK", L"キャンセル", L"WAVEファイル (*.wav)", L"すべてのファイル (*.*)",
-    L"入力WAVEファイル（オリジナル）", L"入力WAVEファイル（カラオケ）", L"出力WAVEファイル（ボーカル）",
+    L"入力ファイル（オリジナル）", L"入力ファイル（カラオケ）", L"出力WAVEファイル（ボーカル）",
     L"作成開始", L"処理中止", L"終了", L"設定...      ", L"使い方...", L"バージョン情報",
-    L"WAVEファイルをドロップしてください。",
+    L"音声ファイルをドロップしてください。",
     L"\"%ls\"\nファイルが開けませんでした。",
     L"\"%ls\"\n扱えないファイル形式です。\nまたはファイルが破損しています。",
     L"\"%ls\"\n扱えない形式のWAVEファイルです。",
@@ -94,6 +95,7 @@ const Lang LANG_JA = {
     L"歌声りっぷ4", L"改良版の抽出方式を使う（推奨）",
     L"２つの音源のEQ・音量の違いを補正し、時間のずれや回転ムラに追従、逆相も自動で判定します。"
     L"この方式が自動で行う設定は灰色になります。",
+    L"音声ファイル", L"%.3fkHz %ls %ls", L"%dチャンネル",
 };
 
 const Lang& pick_language(const std::wstring& code) {

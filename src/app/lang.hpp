@@ -45,6 +45,10 @@ struct Lang {
     int about_height, about_bevel, credits_x, credits_y, credits_w, credits_h, about_ok_top;
     // Utagoe Rip 4 (Misc tab)
     const wchar_t *v4_group, *v4_check, *v4_note;
+    // 4.2: input formats other than 16-bit WAV
+    const wchar_t *audio_files;  // the input dialogs' filter name
+    const wchar_t *info_codec;   // the format label of a compressed file: rate, codec, channels
+    const wchar_t *channels_n;   // more than two channels
 };
 
 extern const Lang LANG_EN;

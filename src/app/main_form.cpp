@@ -8,6 +8,7 @@
 #include <new>
 
 #include "app.hpp"
+#include "engine/audio_io.hpp"
 #include "logic.hpp"
 
 namespace utagoe {
@@ -23,7 +24,7 @@ enum {
     IDC_START = 130, IDC_SETTINGS, IDC_HELP_BTN, IDC_ABOUT, IDC_QUIT, IDC_DBG,
 };
 enum { WM_PROGRESS = WM_APP + 1, WM_STATUS, WM_DONE };
-enum { DONE_OK, DONE_NO_MEMORY, DONE_WRITE_ERROR };
+enum { DONE_OK, DONE_NO_MEMORY, DONE_WRITE_ERROR, DONE_READ_ERROR };
 const UINT_PTR TIMER_STATUS = 1;
 
 std::wstring file_name(const std::wstring& path) {
@@ -166,16 +167,23 @@ void MainForm::save_settings() { cfg.save_ini(ini_path); }
 
 // 0x406fd4: show the format of `path`; returns true on error
 bool MainForm::load_info(const std::wstring& path, HWND label) {
-    WavInfo info;
-    int err = wav_info(path, &info);
+    AudioInfo info;
+    int err = audio_info(path, &info);
     if (err) {
         const wchar_t* f = err == WAV_OPEN_FAILED ? L().cannot_open : err == WAV_BAD_FILE ? L().bad_file : L().bad_format;
         warn(ui::format(f, file_name(path).c_str()));
         SetWindowTextW(label, L"");
         return true;
     }
-    SetWindowTextW(label, ui::format(L().info, info.rate * 0.001, info.bits,
-                                     info.channels == 1 ? L().mono : L().stereo).c_str());
+    std::wstring ch = info.channels == 1 ? L().mono : info.channels == 2 ? L().stereo
+                                                     : ui::format(L().channels_n, info.channels);
+    // a 16-bit WAV reads as in the original; anything else names its format
+    if (info.codec == L"PCM" && info.bits)
+        SetWindowTextW(label, ui::format(L().info, info.rate * 0.001, info.bits, ch.c_str()).c_str());
+    else
+        SetWindowTextW(label, ui::format(L().info_codec, info.rate * 0.001,
+                                         (info.bits ? info.codec + L" " + std::to_wstring(info.bits) + L"-bit"
+                                                    : info.codec).c_str(), ch.c_str()).c_str());
     return false;
 }
 
@@ -190,8 +198,14 @@ void MainForm::auto_search(const std::wstring& path) {  // 0x4058a8
 }
 
 void MainForm::on_browse(int which) {
-    std::wstring filter = std::wstring(L().wave_files) + L'\0' + L"*.WAV" + L'\0';
-    if (which != 3) filter += std::wstring(L().all_files) + L'\0' + L"*.*" + L'\0';
+    std::wstring filter;
+    if (which == 3) {
+        filter = std::wstring(L().wave_files) + L'\0' + L"*.WAV" + L'\0';
+    } else {
+        std::wstring pat;
+        for (const wchar_t* const* e = AUDIO_EXTENSIONS; *e; e++) pat += (pat.empty() ? L"*" : L";*") + std::wstring(*e);
+        filter = std::wstring(L().audio_files) + L'\0' + pat + L'\0' + L().all_files + L'\0' + L"*.*" + L'\0';
+    }
     filter += L'\0';
     wchar_t file[MAX_PATH] = L"";
     OPENFILENAMEW of = {sizeof of};
@@ -238,7 +252,7 @@ void MainForm::on_drop(HDROP drop) {  // 0x406d58
     int zone = 0;
     if (pt.x >= 8 && pt.x < 457) zone = pt.y >= 8 && pt.y < 90 ? 1 : pt.y >= 90 && pt.y < 169 ? 2 : pt.y >= 169 && pt.y < 265 ? 3 : 0;
     if (!zone) return;
-    if (upper_ext(file) != L".WAV") {
+    if (zone != 3 && !is_audio_extension(upper_ext(file))) {
         warn(L().drop_wave);
         return;
     }
@@ -255,7 +269,7 @@ void MainForm::on_drop(HDROP drop) {  // 0x406d58
 
 void MainForm::on_play(HWND edit) {
     std::wstring p = ui::window_text(edit);
-    if (p.empty() || upper_ext(p) != L".WAV" || !exists(p)) return;
+    if (p.empty() || !is_audio_extension(upper_ext(p)) || !exists(p)) return;
     PlayForm(this, p).run();
 }
 
@@ -304,11 +318,6 @@ void MainForm::on_start() {
     if (p3 == p1 || p3 == p2) return warn(l.same_file);
     bool single = p2 == p1;  // the same file twice: process the original on its own
     if (load_info(p1, wform1_) || load_info(p2, wform2_)) return;
-    WavInfo i1, i2;
-    wav_info(p1, &i1);
-    wav_info(p2, &i2);
-    if (i1.rate != i2.rate || i1.channels != i2.channels) return warn(l.rate_mismatch);
-    if (i1.bits != 16 || i2.bits != 16) return warn(l.need_16bit);
     p3 = change_ext(p3, L".wav");
     SetWindowTextW(edit3_, p3.c_str());
     std::wstring name3 = file_name(p3);
@@ -331,8 +340,9 @@ void MainForm::work(std::wstring p1, std::wstring p2, std::wstring p3, bool sing
     int result = DONE_OK;
     try {
         Audio orig, inst;
-        if (!read_wav(p1, &orig) || (!single && !read_wav(p2, &inst))) {
-            result = DONE_WRITE_ERROR;
+        if (!load_audio(p1, 0, 0, &orig) || (!single && !load_audio(p2, orig.rate, orig.channels, &inst))) {
+            read_failed_ = file_name(orig.data.empty() ? p1 : p2);  // finish() reads it after the join
+            result = DONE_READ_ERROR;
         } else {
             Callbacks cb;
             cb.log = [this](const std::wstring& s) { write_log(log_line(L(), s)); };
@@ -364,6 +374,7 @@ void MainForm::finish(int error) {
     close_log();
     if (error == DONE_NO_MEMORY) warn(L().no_memory);
     else if (error == DONE_WRITE_ERROR) warn(L().write_error);
+    else if (error == DONE_READ_ERROR) warn(ui::format(L().bad_file, read_failed_.c_str()));
     if (close_pending_) DestroyWindow(hwnd);
 }
 

@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/audio_io.hpp"
 #include "engine/dsp.hpp"
 #include "engine/engine.hpp"
 
@@ -135,6 +136,83 @@ bool logged(const Run& r, const wchar_t* text) {
     for (const auto& l : r.log)
         if (l.find(text) != std::wstring::npos) return true;
     return false;
+}
+
+// A WAV file of `frames` x `channels` samples from f(frame, channel) in [-1, 1]: 24-bit
+// integer (tag 1), 32-bit float (tag 3) or, with more than two channels, extensible.
+void write_test_wav(const std::wstring& path, int rate, int channels, int tag, int bits, size_t frames,
+                    double (*f)(size_t, int, int)) {
+    FILE* fp = _wfopen(path.c_str(), L"wb");
+    if (!fp) return;
+    uint32_t data_len = (uint32_t)(frames * channels * (bits / 8));
+    bool ext = channels > 2;
+    uint32_t fmt_len = ext ? 40 : 16;
+    auto put = [&](uint32_t v, int n) { for (int i = 0; i < n; i++) fputc((int)(v >> (8 * i)) & 255, fp); };
+    fwrite("RIFF", 1, 4, fp), put(4 + 8 + fmt_len + 8 + data_len, 4), fwrite("WAVEfmt ", 1, 8, fp), put(fmt_len, 4);
+    put(ext ? 0xFFFE : tag, 2), put(channels, 2), put(rate, 4), put(rate * channels * bits / 8, 4);
+    put(channels * bits / 8, 2), put(bits, 2);
+    if (ext) {  // cbSize, valid bits, channel mask, sub-format GUID (KSDATAFORMAT_SUBTYPE_PCM / _IEEE_FLOAT)
+        put(22, 2), put(bits, 2), put(0x3F, 4), put(tag, 2);
+        const unsigned char rest[14] = {0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xAA, 0, 0x38, 0x9B, 0x71};
+        fwrite(rest, 1, 14, fp);
+    }
+    fwrite("data", 1, 4, fp), put(data_len, 4);
+    for (size_t i = 0; i < frames; i++)
+        for (int c = 0; c < channels; c++) {
+            double v = f(i, c, rate);
+            if (tag == 3) {
+                float x = (float)v;
+                fwrite(&x, 4, 1, fp);
+            } else {
+                put((uint32_t)(int32_t)std::lround(v * 8388607.0), 3);
+            }
+        }
+    fclose(fp);
+}
+
+// the input formats other than 16-bit WAV (4.2): sample formats, resampling, channels
+void audio_io_test() {
+    std::printf("audio input\n");
+    wchar_t dir[MAX_PATH];
+    GetTempPathW(MAX_PATH, dir);
+    std::wstring base = std::wstring(dir) + L"utagoe_audio_test_";
+    const double PI = 3.14159265358979323846;
+    auto tone = [](size_t i, int c, int rate) { return 0.5 * std::sin(2 * 3.14159265358979323846 * (440.0 + 220 * c) * i / rate); };
+    auto check = [&](const Audio& a, int rate, double (*f)(size_t, int, int), size_t skip) {
+        double sig = 0, err = 0;
+        for (size_t i = skip; i + skip < a.frames(); i++)
+            for (int c = 0; c < a.channels; c++) {
+                double r = f(i, c, rate) * 32768.0, e = a.data[i * a.channels + c] - r;
+                sig += r * r, err += e * e;
+            }
+        return 10 * std::log10(sig / std::max(err, 1e-9));
+    };
+    Audio a;
+    std::wstring p24 = base + L"24.wav", pf = base + L"f.wav", p48 = base + L"48.wav", p6 = base + L"6.wav";
+    write_test_wav(p24, 44100, 2, 1, 24, 44100, tone);
+    expect(load_audio(p24, 0, 0, &a) && a.rate == 44100 && a.channels == 2 && check(a, 44100, tone, 0) > 80,
+           "24-bit WAV read");
+    write_test_wav(pf, 44100, 2, 3, 32, 44100, tone);
+    expect(load_audio(pf, 0, 0, &a) && check(a, 44100, tone, 0) > 80, "32-bit float WAV read");
+    write_test_wav(p48, 48000, 2, 1, 24, 96000, tone);
+    bool ok = load_audio(p48, 44100, 2, &a);
+    double snr48 = ok ? check(a, 44100, tone, 2000) : 0;
+    std::printf("        48 -> 44.1 kHz: SNR %.1f dB\n", snr48);
+    expect(ok && a.rate == 44100 && std::labs((long)a.frames() - 88200) <= 1 && snr48 > 70, "48 kHz resampled to 44.1 kHz");
+    ok = load_audio(p24, 0, 1, &a) && a.channels == 1;
+    double snr_mono = ok ? check(a, 44100, [](size_t i, int, int rate) {
+        return 0.25 * (std::sin(2 * 3.14159265358979323846 * 440.0 * i / rate) +
+                       std::sin(2 * 3.14159265358979323846 * 660.0 * i / rate));
+    }, 0) : 0;
+    std::printf("        stereo -> mono: SNR %.1f dB\n", snr_mono);
+    expect(ok && snr_mono > 80, "stereo to mono");
+    write_test_wav(p6, 44100, 6, 1, 24, 4410, [](size_t i, int c, int) { return c == 0 ? 0.1 : c == 1 ? -0.1 : c == 2 ? 0.2 : 0.0; });
+    ok = load_audio(p6, 0, 0, &a) && a.channels == 2;
+    // L = FL + 0.707 FC, R = FR + 0.707 FC
+    expect(ok && std::abs(a.data[0] - std::lround((0.1 + 0.70710678 * 0.2) * 32768)) <= 1 &&
+           std::abs(a.data[1] - std::lround((-0.1 + 0.70710678 * 0.2) * 32768)) <= 1, "5.1 mixed down to stereo");
+    for (const std::wstring& p : {p24, pf, p48, p6}) DeleteFileW(p.c_str());
+    (void)PI;
 }
 
 int self_test() {
@@ -262,6 +340,7 @@ int self_test() {
         expect(std::fabs(d.kvol() - 1.2f) < 1e-6 && d.lpf_hz() == 10000 && d.hpf_hz() == 230 &&
                d.cntr_strength() == 2.0f && d.adpt_range() == 3, "settings conversions");
     }
+    audio_io_test();
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures ? 1 : 0;
 }
@@ -271,7 +350,8 @@ int self_test() {
 int wmain(int argc, wchar_t** argv) {
     if (argc < 4) return self_test();
     Audio orig, inst;
-    if (!read_wav(argv[1], &orig) || !read_wav(argv[2], &inst)) {
+    // any supported format; the instrumental at the original's rate and channel count
+    if (!load_audio(argv[1], 0, 0, &orig) || !load_audio(argv[2], orig.rate, orig.channels, &inst)) {
         std::fprintf(stderr, "cannot read input\n");
         return 2;
     }

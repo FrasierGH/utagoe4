@@ -34,6 +34,9 @@ and, since 4.1:
   leftover instrumental, so where the releases match it keeps nearly all of the vocal;
 * **estimates the EQ difference robustly**, unbiased by the vocal.
 
+and, since 4.2, **reads FLAC, MP3, AAC/M4A, ALAC, WMA and WAV of any bit depth**,
+converting a karaoke at another sampling rate or channel count to match the original.
+
 | Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4.0 | 4.1 |
 |---|---:|---:|---:|
 | Identical instrumental | 23.7 | 23.8 | 49.7 |
@@ -101,8 +104,11 @@ gh attestation verify utagoe.exe --repo FrasierGH/utagoe4
 
 ## Using it
 
-1. Drop the original song (a 16-bit WAV) onto the top box, or pick it with the
-   folder button. The instrumental next to it is found automatically, and the
+1. Drop the original song onto the top box, or pick it with the folder
+   button. WAV (any bit depth), FLAC, MP3, AAC/M4A, ALAC and WMA are read (with
+   Windows' own decoders for the compressed formats); a karaoke at another
+   sampling rate or channel count is converted to match the original. The
+   vocal is written as a 16-bit WAV. The instrumental next to it is found automatically, and the
    output name (`<song>_vo.wav`) is filled in.
 2. Press **Start**. Progress is shown at the bottom right and in the title bar.
 3. Listen to the result with the speaker button.
@@ -135,6 +141,9 @@ gh attestation verify utagoe.exe --repo FrasierGH/utagoe4
   from the original's in the least significant bit.
 * **Utagoe Rip 4 separation** (see the top of this page), on by default. Turned
   off, the processing is the original's.
+* **Input formats** (4.2): the original read 16-bit WAV only, at matching
+  sampling rates and channel counts; this version reads the formats above and
+  converts the karaoke to match.
 
 ## Building
 
@@ -187,7 +196,7 @@ git push origin v4.0.0
 
 | Path | Contents |
 |---|---|
-| `src/engine/` | the processing: WAV I/O, settings and the INI format, FFT, `ThVocalFFT`, `CenterFocus`, FIR filters (`dsp`), analysis and block processing (`engine`), the Utagoe Rip 4 separation (`v4`) |
+| `src/engine/` | the processing: WAV output and reading other formats (`audio_io`), settings and the INI format, FFT, `ThVocalFFT`, `CenterFocus`, FIR filters (`dsp`), analysis and block processing (`engine`), the Utagoe Rip 4 separation (`v4`) |
 | `src/app/` | the four windows, a small Win32 layer that reproduces the VCL controls (`ui`), the language tables, the file-name logic, and the resource script |
 | `res/` | icon, artwork and help ripped from the original, plus the English help |
 | `tests/engine_test.cpp` | the test suite and command-line harness |
