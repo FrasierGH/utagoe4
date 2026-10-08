@@ -51,6 +51,9 @@ public:
 
     Audio run();
     bool cancelled() const { return cancelled_; }
+    // with Settings::v4_inst and the Utagoe Rip 4 separation: the matched instrumental
+    // (empty otherwise)
+    const Audio& instrumental() const { return instrumental_; }
     const Analysis& analysis() const { return analysis_; }
 
     // exposed for tests / tools
@@ -82,6 +85,7 @@ private:
     int ch_, rate_;
     bool cancelled_ = false;
     Analysis analysis_;
+    Audio instrumental_;
 };
 
 }  // namespace utagoe

@@ -1,4 +1,4 @@
-// v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard]
+// v4_cli ORIG KARAOKE OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard] [--v41] [--inst INST.wav]
 //
 // Runs the Utagoe Rip 4 separation (src/engine/v4.cpp) on two audio files (any format
 // the program reads) and prints what the alignment found. eval/run.py uses it as engine
@@ -23,10 +23,12 @@ using namespace utagoe;
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 4) {
-        std::fprintf(stderr, "usage: v4_cli ORIG.wav KARAOKE.wav OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard]\n");
+        std::fprintf(stderr, "usage: v4_cli ORIG KARAOKE OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard] "
+                             "[--v41] [--inst INST.wav]\n");
         return 1;
     }
     v4::Options opt;
+    const wchar_t* inst_path = nullptr;
     for (int i = 4; i < argc; i++) {
         if (!wcscmp(argv[i], L"--level") && i + 1 < argc) {
             const wchar_t* v = argv[++i];
@@ -35,8 +37,12 @@ int wmain(int argc, wchar_t** argv) {
             opt.kvol = _wtof(argv[++i]);
         } else if (!wcscmp(argv[i], L"--extraction")) {
             opt.quality = false;
+        } else if (!wcscmp(argv[i], L"--inst") && i + 1 < argc) {  // also write the matched instrumental
+            inst_path = argv[++i];
+        } else if (!wcscmp(argv[i], L"--v41")) {  // Utagoe Rip 4.1: without 4.3's additions
+            opt.mimo = opt.noref = opt.wow = false;
         } else if (!wcscmp(argv[i], L"--hard")) {  // Utagoe Rip 4.0: 4.0's EQ passes and 3.0's rule
-            opt.huber = opt.soft = false;
+            opt.huber = opt.soft = opt.mimo = opt.noref = opt.wow = false;
             opt.const_lag = 0.0;
         }
     }
@@ -53,11 +59,12 @@ int wmain(int argc, wchar_t** argv) {
         return p;
     };
     v4::Report rep;
-    auto y = v4::separate(planar(orig), planar(kar), orig.rate, opt, &rep);
+    std::vector<std::vector<double>> inst;
+    auto y = v4::separate(planar(orig), planar(kar), orig.rate, opt, &rep, nullptr, inst_path ? &inst : nullptr);
     std::printf("lag %ld sign %d drift_line %d lag_start %.3f lag_end %.3f stretch %.3f resampled %d "
-                "level_gain %.3f level_applied %d soft_q %.2f\n",
+                "level_gain %.3f level_applied %d soft_q %.2f mimo %d lowpass %.0f wow_lowband %d\n",
                 rep.lag, rep.sign, (int)rep.drift_line, rep.lag_start, rep.lag_end, rep.stretch, (int)rep.resampled,
-                rep.level_gain, (int)rep.level_applied, rep.soft_q);
+                rep.level_gain, (int)rep.level_applied, rep.soft_q, (int)rep.mimo, rep.lowpass_hz, (int)rep.wow_lowband);
     Audio out;
     out.rate = orig.rate;
     out.channels = orig.channels;
@@ -65,5 +72,12 @@ int wmain(int argc, wchar_t** argv) {
     for (size_t i = 0; i < orig.frames(); i++)
         for (int c = 0; c < orig.channels; c++)
             out.data[i * orig.channels + c] = (int16_t)std::clamp(std::lround(y[c][i] * 32768.0), -32768L, 32767L);
+    if (inst_path) {
+        Audio ia = out;
+        for (size_t i = 0; i < orig.frames(); i++)
+            for (int c = 0; c < orig.channels; c++)
+                ia.data[i * orig.channels + c] = (int16_t)std::clamp(std::lround(inst[c][i] * 32768.0), -32768L, 32767L);
+        if (!write_wav(inst_path, ia)) return 2;
+    }
     return write_wav(argv[3], out) ? 0 : 2;
 }

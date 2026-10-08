@@ -40,6 +40,7 @@ struct Settings {
     std::wstring vname_txt = L"_vo";        // VnameTxt
     std::wstring language;                  // Language (not in the original: "ja", "en" or "")
     bool v4 = true;                         // V4Engine: Utagoe Rip 4 separation (not in the original)
+    bool v4_inst = false;                   // V4SaveInst: also save the matched instrumental (4.3)
 
     // derived values
     int block_ms() const { return blk_size < 50 ? 50 : blk_size; }

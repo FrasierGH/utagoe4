@@ -51,6 +51,7 @@ const Lang LANG_EN = {
     L"Matches EQ and level differences between the two releases, follows timing drift and speed "
     L"wobble, and detects inverted polarity. The settings it takes care of itself are greyed out.",
     L"Audio files", L"%.3fkHz %ls %ls", L"%d channels",
+    L"Also save the instrumental as matched to the original (*_inst.wav)",
 };
 
 const Lang LANG_JA = {
@@ -96,6 +97,7 @@ const Lang LANG_JA = {
     L"２つの音源のEQ・音量の違いを補正し、時間のずれや回転ムラに追従、逆相も自動で判定します。"
     L"この方式が自動で行う設定は灰色になります。",
     L"音声ファイル", L"%.3fkHz %ls %ls", L"%dチャンネル",
+    L"原曲に合わせたカラオケも保存する（*_inst.wav）",
 };
 
 const Lang& pick_language(const std::wstring& code) {

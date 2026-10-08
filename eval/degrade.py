@@ -183,6 +183,23 @@ def mp3(x, kbps=192, rate=RATE):
     return out
 
 
+def lowpass_brick(x, hz=16000.0, width=300.0, rate=RATE):
+    """A lossy coder's low-pass without its coding noise: zero phase, flat to `hz` - width,
+    a raised-cosine fall over `width`, nothing above `hz`."""
+    n = len(x)
+    X = np.fft.rfft(x, axis=0)
+    f = np.fft.rfftfreq(n, 1 / rate)
+    g = np.clip((hz - f) / width, 0, 1)
+    g = 0.5 - 0.5 * np.cos(np.pi * g)
+    return np.fft.irfft(X * g[:, None], n, axis=0)
+
+
+def narrower(x, side=0.6):
+    """The stereo image narrowed: mid kept, side scaled."""
+    m, s = (x[:, 0] + x[:, 1]) / 2, (x[:, 0] - x[:, 1]) / 2
+    return np.stack([m + side * s, m - side * s], axis=1)
+
+
 # ---------------------------------------------------------------- scenarios
 @dataclass
 class Case:
@@ -244,4 +261,8 @@ SCENARIOS = {
     'mp3': _mp3,
     # remaster + level + offset + drift + MP3 (approximate target)
     'everything': _everything,
+    # a band-limited karaoke (a YouTube or low-bitrate rip): nothing above 16 kHz
+    'kar_lowpass': lambda v, i: Case(v + i, lowpass_brick(i), v),
+    # the karaoke's stereo image narrower (another mix or master): side at 60 %
+    'stereo_width': lambda v, i: Case(v + i, narrower(i), v),
 }

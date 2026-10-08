@@ -20,6 +20,9 @@ struct Options {
     int huber_iters = 2;
     bool soft = true;         // soft decision per cell (4.1); false: 3.0's keep-or-delete rule
     double const_lag = 0.1;   // a fitted drift under this many samples counts as none (4.1; 4.0: 0)
+    bool noref = true;        // a band-limited karaoke: the mix above its cut by the vocal's share (4.3)
+    bool wow = true;          // a wobbling lag: also try the refinement from below 500 Hz (4.3)
+    bool mimo = true;         // stereo: a 2x2 EQ where it predicts clearly better (4.3; needs huber)
 };
 
 struct Report {
@@ -32,6 +35,9 @@ struct Report {
     double stretch = 0;        // typical lag change across one frame, samples
     bool resampled = false;    // the karaoke was resampled along the lag curve (stretch > 0.6)
     double soft_q = 0;         // soft decision: the quantile the model error was read at (0: hard rule)
+    bool wow_lowband = false;  // the lag's refinement started below 500 Hz (a wobble out of range)
+    double lowpass_hz = 0;     // the karaoke's cut, where it is band-limited (0: it is not)
+    bool mimo = false;         // the 2x2 EQ was used (the karaoke's stereo image differs)
 };
 
 // mix and kar: planar, the same number of channels (1 or 2), samples in [-1, 1].
@@ -40,7 +46,10 @@ struct Report {
 std::vector<std::vector<double>> separate(const std::vector<std::vector<double>>& mix,
                                           const std::vector<std::vector<double>>& kar, int rate,
                                           const Options& opt, Report* report = nullptr,
-                                          const std::function<bool(int)>& progress = nullptr);
+                                          const std::function<bool(int)>& progress = nullptr,
+                                          std::vector<std::vector<double>>* instrumental = nullptr);
+// instrumental: if given, also the instrumental as subtracted (the karaoke matched to
+// the mix in timing, polarity, EQ and level), planar, as long as mix.
 
 }  // namespace v4
 }  // namespace utagoe

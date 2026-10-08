@@ -69,6 +69,7 @@ const Key KEYS[] = {
     {L"SoundQty", &Settings::sound_qty, nullptr, nullptr},
     {L"Language", nullptr, nullptr, &Settings::language},
     {L"V4Engine", nullptr, &Settings::v4, nullptr},
+    {L"V4SaveInst", nullptr, &Settings::v4_inst, nullptr},
 };
 
 }  // namespace

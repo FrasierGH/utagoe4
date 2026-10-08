@@ -331,6 +331,61 @@ int self_test() {
         Song brief = make_song(5.0, 100);
         Run rb = run(brief, v);
         expect(logged(rb, L"under 8 s") && snr(rb.out, brief.vocal) > 20, "v4: under 8 s, 3.0's processing");
+        {  // the matched instrumental (4.3): the karaoke as subtracted, aligned to the original
+            Settings vi = v;
+            vi.v4_inst = true;
+            Callbacks cb;
+            UtagoeRip rip(s.orig, &s.inst, vi, cb);
+            Audio out = rip.run();
+            const Audio& in = rip.instrumental();
+            double sig = 0, err = 0;  // against the original minus its vocal
+            for (size_t i = 0; i < in.frames() && i < s.orig.frames(); i++)
+                for (int c = 0; c < 2; c++) {
+                    double r = (double)s.orig.data[i * 2 + c] - s.vocal[i], e = in.data[i * 2 + c] - r;
+                    sig += r * r, err += e * e;
+                }
+            double x = 10 * std::log10(sig / std::max(err, 1e-9));
+            std::printf("        matched instrumental SNR %.1f dB\n", x);
+            expect(in.frames() == s.orig.frames() && x > 40, "v4: matched instrumental saved");
+        }
+        // 4.3: the identical pair needs neither the 2x2 EQ nor the band-limited handling
+        expect(!logged(r, L"eq:2x2") && !logged(r, L"kar-lowpass") && !logged(r, L"from 500 Hz"),
+               "v4: nothing extra for an identical pair");
+        {  // a karaoke whose stereo image is narrower (side at 60 %): the 2x2 EQ
+            Song nw = s;
+            for (size_t i = 0; i < nw.inst.frames(); i++) {
+                double l = s.inst.data[i * 2], rr = s.inst.data[i * 2 + 1], m = (l + rr) / 2, sd = (l - rr) / 2;
+                nw.inst.data[i * 2] = (int16_t)std::lround(m + 0.6 * sd);
+                nw.inst.data[i * 2 + 1] = (int16_t)std::lround(m - 0.6 * sd);
+            }
+            Run rw = run(nw, v);
+            double xw = snr(rw.out, s.vocal);
+            std::printf("        narrower karaoke: v4 SNR %.1f dB\n", xw);
+            expect(logged(rw, L"eq:2x2") && xw > 35, "v4: narrower karaoke, 2x2 EQ");
+        }
+        {  // a band-limited karaoke (nothing above 15 kHz): found, and the vocal kept
+            Song bl = s;
+            const int taps = 511, mid = taps / 2;
+            const double fc = 15000.0 / 44100.0;
+            std::vector<double> h(taps);
+            for (int j = 0; j < taps; j++) {
+                double u = j - mid, sinc = u == 0 ? 2 * fc : std::sin(2 * PI * fc * u) / (PI * u);
+                h[j] = sinc * (0.42 - 0.5 * std::cos(2 * PI * j / (taps - 1)) + 0.08 * std::cos(4 * PI * j / (taps - 1)));
+            }
+            for (size_t i = 0; i < frames; i++)
+                for (int c = 0; c < 2; c++) {
+                    double acc = 0;
+                    for (int j = 0; j < taps; j++) {
+                        long long idx = (long long)i + j - mid;
+                        if (idx >= 0 && idx < (long long)frames) acc += h[j] * s.inst.data[(size_t)idx * 2 + c];
+                    }
+                    bl.inst.data[i * 2 + c] = (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, acc)));
+                }
+            Run rbl = run(bl, v);
+            double xb = snr(rbl.out, s.vocal);
+            std::printf("        band-limited karaoke: v4 SNR %.1f dB\n", xb);
+            expect(logged(rbl, L"kar-lowpass:") && xb > 25, "v4: band-limited karaoke");
+        }
         v.cntr_flag = v.lpf_flag = v.hpf_flag = true;
         expect(run(s, v).out.frames() == s.orig.frames(), "v4: filters + centralization");
     }

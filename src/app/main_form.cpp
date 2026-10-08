@@ -27,6 +27,13 @@ enum { WM_PROGRESS = WM_APP + 1, WM_STATUS, WM_DONE };
 enum { DONE_OK, DONE_NO_MEMORY, DONE_WRITE_ERROR, DONE_READ_ERROR };
 const UINT_PTR TIMER_STATUS = 1;
 
+// the matched instrumental's file next to the vocal: <vocal>_inst.wav (4.3)
+std::wstring inst_path(const std::wstring& vocal) {
+    size_t dot = vocal.rfind(L'.'), slash = vocal.find_last_of(L"\\/");
+    std::wstring stem = dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash) ? vocal.substr(0, dot) : vocal;
+    return stem + L"_inst.wav";
+}
+
 std::wstring file_name(const std::wstring& path) {
     size_t s = path.find_last_of(L"\\/:");
     return s == std::wstring::npos ? path : path.substr(s + 1);
@@ -322,6 +329,16 @@ void MainForm::on_start() {
     SetWindowTextW(edit3_, p3.c_str());
     std::wstring name3 = file_name(p3);
     if (exists(p3) && !confirm(ui::format(l.overwrite, name3.c_str()))) return;
+    std::wstring p_inst = inst_path(p3);
+    if (cfg.v4 && cfg.v4_inst && !single) {
+        if (_wcsicmp(p_inst.c_str(), p1.c_str()) == 0 || _wcsicmp(p_inst.c_str(), p2.c_str()) == 0)
+            return warn(l.same_file);
+        if (exists(p_inst)) {
+            if (!confirm(ui::format(l.overwrite, file_name(p_inst).c_str()))) return;
+            // a run that saves none (3.0's processing under 8 s, cancelled) leaves no stale one
+            DeleteFileW(p_inst.c_str());
+        }
+    }
     FILE* f = _wfopen(p3.c_str(), L"wb");
     if (!f) return warn(ui::format(l.create_failed, name3.c_str()));
     fclose(f);
@@ -353,6 +370,8 @@ void MainForm::work(std::wstring p1, std::wstring p2, std::wstring p3, bool sing
             UtagoeRip rip(orig, single ? nullptr : &inst, c, cb, false, &cache_, p1, p2);
             Audio out = rip.run();
             if (!write_wav(p3, out)) result = DONE_WRITE_ERROR;
+            else if (!rip.instrumental().data.empty() && !write_wav(inst_path(p3), rip.instrumental()))
+                result = DONE_WRITE_ERROR;
         }
     } catch (std::bad_alloc&) {
         result = DONE_NO_MEMORY;

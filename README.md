@@ -37,26 +37,47 @@ and, since 4.1:
 and, since 4.2, **reads FLAC, MP3, AAC/M4A, ALAC, WMA and WAV of any bit depth**,
 converting a karaoke at another sampling rate or channel count to match the original.
 
-| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4.0 | 4.1 |
-|---|---:|---:|---:|
-| Identical instrumental | 23.7 | 23.8 | 49.7 |
-| Karaoke at a different level | 23.5 | 25.3 | 49.6 |
-| Karaoke with inverted polarity | 23.7 | 23.8 | 47.0 |
-| Album EQ'd for mastering | 5.5 | 22.6 | 31.1 |
-| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 | 12.7 |
-| Both mastered, each with its own dynamics | 17.4 | 19.3 | 20.2 |
-| Karaoke from a different master | 7.1 | 17.8 | 18.3 |
-| Fractional-sample offset | 22.3 | 23.8 | 48.7 |
-| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 | 45.0 / 42.8 |
-| Vinyl or tape wow | 18.1 | 20.0 | 21.7 |
-| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 | 15.1 |
+and, since 4.3:
+
+* **handles a karaoke whose stereo image differs** (another mix's width or balance)
+  with a 2x2 EQ, each channel matched from both karaoke channels, where that clearly
+  fits better;
+* **handles a band-limited karaoke** (a video-site or low-bitrate rip with nothing
+  above 16 kHz or so). Above its cut nothing can be subtracted, so earlier versions
+  passed the album's cymbals and air into the vocal; 4.3 keeps the album there only in
+  proportion to the vocal, frame by frame;
+* **follows stronger wow**, where the timing wobbles further than the usual
+  refinement can reach;
+* can **save the matched instrumental** next to the vocal (Settings > Misc), the
+  karaoke lined up with the original and matched to it, for use in other tools.
+
+In the benchmark's other scenarios 4.3's results are 4.1's, apart from one song that
+improved.
+
+| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4.0 | 4.1 | 4.3 |
+|---|---:|---:|---:|---:|
+| Identical instrumental | 23.7 | 23.8 | 49.7 | 49.7 |
+| Karaoke at a different level | 23.5 | 25.3 | 49.6 | 49.6 |
+| Karaoke with inverted polarity | 23.7 | 23.8 | 47.0 | 47.0 |
+| Album EQ'd for mastering | 5.5 | 22.6 | 31.1 | 31.1 |
+| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 | 12.7 | 12.8 |
+| Both mastered, each with its own dynamics | 17.4 | 19.3 | 20.2 | 20.2 |
+| Karaoke from a different master | 7.1 | 17.8 | 18.3 | 18.3 |
+| Fractional-sample offset | 22.3 | 23.8 | 48.7 | 48.7 |
+| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 | 45.0 / 42.8 | 45.0 / 42.8 |
+| Vinyl or tape wow | 18.1 | 20.0 | 21.7 | 22.4 |
+| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 | 15.1 | 15.1 |
+| Karaoke band-limited (nothing above 16 kHz) | 21.1 | 21.2 | 26.7 | 32.4 |
+| Karaoke with a narrower stereo image | 16.9 | 17.6 | 16.4 | 43.4 |
 
 Measured on MUSDB18-HQ test songs 11-50 (39 with a vocal in the excerpt), each
 release pair built from the song's stems; higher is better (each 10 dB is a tenth of
 the error energy). Synthetic songs give the same picture. Utagoe Rip 4 is not better everywhere:
-see the limitations in [eval/README.md](eval/README.md#results) (wow can still defeat
-the alignment on some songs; with MP3 files it leaves a little more coding noise in the
-vocal's pauses than 3.0; it takes about three times as long).
+see the limitations in [eval/README.md](eval/README.md#results) (on a few songs 3.0
+still copes better with wow; with MP3 files it leaves a little more coding noise in the
+vocal's pauses than 3.0; where the releases' EQ differs it leaves more leftover
+instrumental in the pauses than 4.0 did, in exchange for a fuller vocal; it takes three
+to four times as long).
 
 How this was measured, and how the new separation works, is in
 [eval/README.md](eval/README.md). The separation is `src/engine/v4.cpp`; the Python
@@ -88,8 +109,9 @@ Get `utagoe.exe` from the [Releases](../../releases) page and run it, or build i
 yourself (see below). The plain 3.0 rebuild is released at
 [FrasierGH/utagoe](https://github.com/FrasierGH/utagoe/releases).
 Settings are kept in `%LOCALAPPDATA%\UtagoeRip\utagoe.ini`, shared with 3.0
-(Utagoe Rip 4 adds one key, `V4Engine`; saving settings in the 3.0 rebuild drops it,
-which turns Utagoe Rip 4's separation back on).
+(Utagoe Rip 4 adds two keys, `V4Engine` and `V4SaveInst`; saving settings in the 3.0
+rebuild drops them, which turns Utagoe Rip 4's separation back on and the
+instrumental export off).
 
 Releases are built by GitHub Actions from the tagged source
 (`.github/workflows/build.yml`). A release lists the exe's SHA-256, and the
@@ -119,6 +141,11 @@ gh attestation verify utagoe.exe --repo FrasierGH/utagoe4
 * **Language**: follows Windows. To force one, add `Language=ja` or
   `Language=en` to `[V30_Option]` in the INI file, or start the program with
   `--lang ja` / `--lang en`.
+* **Matched instrumental** (4.3, Settings > Misc): also saves
+  `<vocal>_inst.wav`, the karaoke as the separation subtracted it, lined up
+  with the original in time and polarity and matched to it in EQ and level.
+  Handy as the instrumental for other tools. Only Utagoe Rip 4's separation
+  makes one (not 3.0's processing, which it also uses for files under 8 s).
 * **Same file in both input boxes**: applies only Extraction Centralization
   and the filters to the original.
 * **Hidden debug mode** (as in the original): double-click the invisible
@@ -174,12 +201,14 @@ The program is `build/utagoe.exe`.
 `ctest` runs `engine_test`, which builds a synthetic song (a known "vocal"
 over an instrumental, with an offset instrumental file) and checks that every
 mode recovers the vocal, with 3.0's processing and with Utagoe Rip 4's (including
-an inverted and a drifting instrumental). It also covers the offset search,
+an inverted, a drifting, a narrower and a band-limited instrumental). It also covers the offset search,
 the settings and the INI format. `engine_test ORIGINAL INSTRUMENTAL OUTPUT
 [Key=Value ...]` processes files from the command line with 3.0's processing
 (`V4Engine=1` for v4) and prints the analysis log. `v4_cli ORIGINAL INSTRUMENTAL
 OUTPUT` runs the v4 separation alone and prints what it found (offset,
-polarity, drift, level tracking); `--hard` runs it as 4.0 did. The benchmark against 3.0 is in `eval/` (Python).
+polarity, drift, level tracking, the 2x2 EQ, a band-limited karaoke's cut);
+`--inst FILE` also writes the matched instrumental, and `--v41` and `--hard` run it
+as 4.1 and 4.0 did. The benchmark against 3.0 is in `eval/` (Python).
 
 ### Releasing
 

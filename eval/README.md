@@ -8,9 +8,9 @@ ear.
 pip install -r eval/requirements.txt          # numpy, scipy, soundfile; lame on the PATH for MP3
 cmake -S . -B build -A x64 && cmake --build build --config Release
 python eval/run.py                            # dev: 3 synthetic songs, all scenarios, all engines
-python eval/run.py --set holdout41            # 20 synthetic songs nothing was tuned on
+python eval/run.py --set holdout43            # 20 synthetic songs nothing was tuned on
 python eval/run.py --stems DIR --set test     # MUSDB18-HQ test songs 11-50
-python eval/run.py --set holdout41 --metric leak  # another metric (scores are cached)
+python eval/run.py --set holdout43 --metric leak  # another metric (scores are cached)
 ```
 
 Long runs can be split with `--shard i/n` (every n-th song); `--report` merges the
@@ -50,6 +50,8 @@ the mix.
 | `wow` | vinyl/tape speed wobble: +-6 samples at 0.55 Hz (a 33 rpm record) plus a slow +-4 |
 | `mp3` | both through 192 kbps MP3 |
 | `everything` | remaster + level + offset + drift + MP3 |
+| `kar_lowpass` | karaoke band-limited: nothing above 16 kHz (a low-bitrate or video-site rip), without coding noise |
+| `stereo_width` | karaoke's stereo image narrower (side at 60 %), as from another mix or master |
 
 Mastering is an EQ followed by gain envelopes computed on the whole release, so the
 vocal inside a mastered mix is exactly `gain(t) * EQ(vocal)`. The chains are
@@ -89,6 +91,8 @@ All ignore the first and last second (start-up and tail effects in every engine)
   them, but they were scored after each of 4.1's last revisions.
 * **holdout41**: synthetic seeds 6000-6019, added after those revisions and scored
   once, with the final code. Nothing was tuned on them.
+* **holdout43**: synthetic seeds 7000-7019, added for 4.3 and scored once, with the
+  final code. Nothing was tuned on them.
 
 ## Engines
 
@@ -102,12 +106,14 @@ All ignore the first and last second (start-up and tail effects in every engine)
 | `proto-eq-align` | plus frame-by-frame alignment |
 | `v4` | plus automatic level tracking: Utagoe Rip 4.0 |
 | `v41` | plus the EQ by Huber-weighted least squares and the soft decision: Utagoe Rip 4.1 |
-| `v4-cpp` | the C++ port of `v41` (`src/engine/v4.cpp` through `tests/v4_cli`), what the program runs |
-| `v40-cpp` | the same port run as 4.0 (`v4_cli --hard`) |
+| `v43` | plus the 2x2 EQ for a different stereo image, a band-limited karaoke's top band and the low-band start for wow: Utagoe Rip 4.3 |
+| `v4-cpp` | the C++ port of `v43` (`src/engine/v4.cpp` through `tests/v4_cli`), what the program runs |
+| `v41-cpp`, `v40-cpp` | the same port run as 4.1 (`v4_cli --v41`) and as 4.0 (`v4_cli --hard`) |
 
 `proto.py` also keeps variants that were tried and not adopted (`proto-eq-ls1`,
-`proto-eq-align-lvl`, `proto-eq-align-auto`, `v4-cv`), for reproducibility. `v4`
-(4.0) and `v41` share everything but the EQ estimate, the decision and the constant-lag test.
+`proto-eq-align-lvl`, `proto-eq-align-auto`, `v4-cv`, `v43-eqq`), for reproducibility. `v4`
+(4.0) and `v41` share everything but the EQ estimate, the decision and the constant-lag
+test; `v43` is `v41` with three options turned on (`mimo`, `noref`, `wow`).
 
 ## How v4 works
 
@@ -159,6 +165,19 @@ kept; otherwise the refinement is applied and repeated up to 6 kHz. Accuracy on 
 curves: 0.01-0.04 samples for offsets and drift up to 300 ppm, wow 0.14 typical (a few
 frames up to ~2.4).
 
+A wobble the coarse windows missed can leave errors beyond the 2 kHz band's
+unambiguous range (about 11 samples). 4.3 also runs the refinement starting below
+500 Hz (unambiguous to about 44 samples), then 2 kHz and 6 kHz, and keeps that path
+where the instrumental fits clearly better along it: each path gets its own EQ
+estimate, and on the cells the instrumental dominates along the usual path (which
+keeps the vocal out of the comparison) the low-band path must leave under 0.9 of the
+residual (a threshold chosen on the dev songs). Always taking the low-band path helped
+some songs by up to 4.5 dB and cost others up to 4.2 dB, where there was nothing to
+reach and the low band's coarser phase only added noise. On the dev songs the test took
+it for 2 of 13 (+0.2 and +4.5 dB) and lost nowhere; checked afterwards on the MUSDB test
+songs' `wow` cases, it took it for 12 of 39, gaining up to 11.2 dB (*Mu - Too Bright*)
+and losing 1.6 dB on one.
+
 **Reading the karaoke along the curve.** While the lag holds still over a frame (8192
 samples), each frame is cut at its integer lag and the fraction applied as a linear
 phase, which is exact. When the lag moves by more than 0.6 samples across a frame
@@ -176,6 +195,15 @@ so least squares is unbiased; the weights only keep it from adding noise. (4.0 t
 second pass over the cells the first said the instrumental dominates, with `|H|` from
 their power ratio; that selection biases the estimate slightly, which capped how well
 an exact match could subtract.)
+
+A per-channel gain cannot follow a karaoke whose stereo image differs (another width
+or balance: each album channel then holds some of the other karaoke channel). For
+stereo, 4.3 also fits a 2x2 EQ per bin (each output channel from both karaoke
+channels, the same Huber weighting, a ridge of 10^-6 of the trace) and uses it where it
+predicts held-out frames clearly better: both models are fitted on the even frames and
+judged on the odd frames' cells the instrumental dominates, and the 2x2 one must leave
+more than 20 % less residual. Where the image is the same its extra freedom only adds
+estimation noise (always using it cost 1-2 dB on exact matches).
 
 **Level tracking (auto).** A per-frame gain correction for releases whose dynamics
 differ, smoothed over ~50 ms, in three steps: least squares over all cells (the vocal
@@ -209,6 +237,26 @@ both files are identical (in practice an album and a karaoke track are coded
 separately). `s` is the Extractable Level setting over its
 default (1.2), doubled in Extraction Priority mode. 4.0 used 3.0's rule against `I`.
 
+Tried for 4.3 and not adopted (`v43-eqq`): where the model can be exact but the EQ
+difference has shape (more than 1.5 dB off its median between 100 Hz and 10 kHz),
+reading the error at 0.25 instead of 0.10. On `album_eq` it left 3.4 dB less
+instrumental in the pauses and scored 1 dB higher on average, but cost up to 4.8 dB of
+vocal on some MUSDB songs (seven lost more than 1 dB).
+
+**Band-limited karaoke (4.3).** A karaoke ripped from a video site or coded at a low
+bitrate often has nothing above 16 kHz or so, while the album does. There is nothing to
+subtract above the cut, so before 4.3 everything the album has there (cymbals, air)
+passed into the vocal. The cut is found from the mean spectra: bins where the
+karaoke's power is 20 dB under its usual share of the album's (1-8 kHz), those where
+the album itself is silent counting either way; the top run of them (gaps under 500 Hz
+bridged) must start below 20 kHz and hold at least 1 kHz where the album is not
+silent; and the karaoke's own spectrum must fall by 20 dB across the cut (from the
+750 Hz below it to the 750 Hz above, 250 Hz either side left out), which a dark
+arrangement's gradual roll-off under a bright vocal does not. Above it, the album is kept in proportion to the vocal's share of the half
+octave below the cut, frame by frame and smoothed over a few frames: the vocal's air
+where it sings, nothing in its pauses. Zeroing the band instead scored nearly as well
+but removes the vocal's own highs.
+
 ## Real songs
 
 `--stems DIR` takes a folder of song folders, each with `vocals.wav` and either
@@ -227,50 +275,54 @@ python eval/run.py --stems D:/datasets/musdb18hq/test --set test
 
 ## Results
 
-4.1 and 4.0 here are the C++ separation as the program runs it (`v4-cpp`) and as 4.0
-ran it (`v40-cpp`); the Python prototypes give the same output to -55 dB or better.
-Median SDR in dB, higher is better; the difference is per song, with a 95 % bootstrap
-confidence interval and the number of songs 4.1 beats 3.0 on. The last column is the
-same difference for leak (positive: 4.1 leaks less).
+4.3, 4.1 and 4.0 here are the C++ separation as the program runs it (`v4-cpp`), and
+as 4.1 and 4.0 ran it (`v41-cpp`, `v40-cpp`); the Python prototypes give the same
+output to -55 dB or better. Median SDR in dB, higher is better. The differences are
+per song, with a 95 % bootstrap confidence interval; "better / worse" counts the songs
+where 4.3 differs from 4.1 by more than 0.05 dB, with the worst difference. The last
+column is the same difference for leak (positive: 4.3 leaks less).
 
-**Holdout synthetic songs** (`holdout41`: 20, added last and scored once, nothing tuned on them):
+**Holdout synthetic songs** (`holdout43`: 20, added last and scored once, nothing tuned on them):
 
-| Scenario | 3.0 | 4.0 | 4.1 | 4.1 − 3.0 [95 % CI] | 4.1 better | leak, 4.1 better by |
-|---|---:|---:|---:|---:|---:|---:|
-| `clean` | 28.32 | 28.39 | 58.35 | +30.03 [+29.15, +30.94] | 20/20 | +19.85 [+18.12, +21.23] |
-| `level` | 27.95 | 29.91 | 57.47 | +29.52 [+28.76, +30.33] | 20/20 | +19.04 [+17.43, +20.33] |
-| `inverted` | 28.31 | 28.38 | 51.90 | +23.59 [+22.92, +24.34] | 20/20 | +12.90 [+11.78, +14.00] |
-| `album_eq` | 3.97 | 27.02 | 32.25 | +28.28 [+27.45, +28.95] | 20/20 | +27.84 [+26.71, +28.67] |
-| `album_loud` | -3.23 | 10.08 | 11.35 | +14.58 [+14.03, +15.13] | 20/20 | +13.86 [+12.66, +15.41] |
-| `both_loud` | 22.34 | 23.40 | 23.75 | +1.41 [+0.97, +1.89] | 19/20 | +1.67 [+0.44, +2.89] |
-| `both_diff` | 8.23 | 23.10 | 23.22 | +14.99 [+14.36, +15.64] | 20/20 | +12.85 [+11.31, +14.90] |
-| `offset_frac` | 26.52 | 28.39 | 51.33 | +24.81 [+23.98, +25.75] | 20/20 | +12.73 [+10.98, +14.48] |
-| `drift` | 27.03 | 28.38 | 41.25 | +14.22 [+11.64, +16.85] | 20/20 | +3.88 [+0.59, +7.12] |
-| `drift_fast` | 20.55 | 27.64 | 32.82 | +12.27 [+11.21, +13.22] | 20/20 | +9.40 [+7.88, +10.69] |
-| `wow` | 19.28 | 25.46 | 23.35 | +4.08 [+3.29, +4.84] | 20/20 | +6.67 [+4.88, +8.12] |
-| `mp3` | 20.18 | 19.67 | 19.64 | -0.55 [-0.64, -0.46] | 0/20 | -1.22 [-1.40, -1.05] |
-| `everything` | 7.13 | 15.74 | 16.63 | +9.50 [+9.17, +9.85] | 20/20 | +11.46 [+10.96, +11.95] |
+| Scenario | 3.0 | 4.0 | 4.1 | 4.3 | 4.3 − 3.0 [95 % CI] | 4.3 − 4.1 [95 % CI] | 4.3 vs 4.1: better / worse (worst) | leak, 4.3 better than 4.1 by |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `clean` | 27.50 | 27.56 | 57.56 | 57.56 | +30.05 [+29.14, +30.97] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `level` | 27.02 | 28.81 | 56.61 | 56.61 | +29.59 [+28.75, +30.46] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `inverted` | 27.48 | 27.56 | 50.83 | 50.83 | +23.35 [+22.58, +24.15] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `album_eq` | 3.18 | 25.98 | 31.67 | 31.67 | +28.49 [+27.92, +29.03] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `album_loud` | -3.86 | 9.43 | 10.81 | 10.81 | +14.67 [+14.05, +15.26] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `both_loud` | 22.08 | 22.88 | 23.80 | 23.80 | +1.71 [+1.04, +2.38] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `both_diff` | 7.66 | 22.53 | 22.75 | 22.75 | +15.09 [+14.37, +15.79] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `offset_frac` | 25.64 | 27.53 | 50.09 | 50.09 | +24.45 [+23.61, +25.37] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift` | 25.78 | 27.57 | 39.49 | 39.49 | +13.71 [+11.13, +16.41] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift_fast` | 19.41 | 26.63 | 31.68 | 31.68 | +12.27 [+11.06, +13.35] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `wow` | 17.52 | 24.28 | 22.86 | 23.07 | +5.55 [+4.98, +6.13] | +0.22 [+0.00, +0.52] | 3 / 0 (+0.00) | +0.98 [-0.14, +2.94] |
+| `mp3` | 19.50 | 18.97 | 18.90 | 18.90 | -0.60 [-0.70, -0.50] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `everything` | 6.56 | 15.24 | 16.14 | 16.14 | +9.59 [+9.29, +9.86] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `kar_lowpass` | 14.51 | 14.48 | 14.72 | 31.24 | +16.73 [+15.65, +17.74] | +16.52 [+15.41, +17.55] | 20 / 0 (+10.83) | +19.80 [+19.46, +20.12] |
+| `stereo_width` | 17.20 | 17.80 | 15.58 | 53.92 | +36.73 [+36.13, +37.29] | +38.34 [+37.79, +38.87] | 20 / 0 (+35.43) | +39.19 [+38.46, +39.91] |
 
-The `final41`, `final` and `fresh` songs give the same picture (every 4.1 value within
-1.3 dB of these).
+The `holdout41`, `final41`, `final` and `fresh` songs give the same picture for 4.1.
 
 **MUSDB18-HQ test songs 11-50** (30 s excerpts; 39 songs, see below):
 
-| Scenario | 3.0 | 4.0 | 4.1 | 4.1 − 3.0 [95 % CI] | 4.1 better | leak, 4.1 better by |
-|---|---:|---:|---:|---:|---:|---:|
-| `clean` | 23.67 | 23.78 | 49.71 | +26.04 [+22.82, +29.08] | 39/39 | +11.33 [+9.20, +13.48] |
-| `level` | 23.51 | 25.30 | 49.64 | +26.13 [+23.08, +29.03] | 39/39 | +10.15 [+8.46, +11.74] |
-| `inverted` | 23.67 | 23.78 | 47.00 | +23.34 [+20.70, +25.73] | 39/39 | +6.67 [+5.30, +7.94] |
-| `album_eq` | 5.45 | 22.62 | 31.06 | +25.61 [+24.25, +26.78] | 39/39 | +28.77 [+27.52, +30.11] |
-| `album_loud` | -4.37 | 11.65 | 12.73 | +17.11 [+16.08, +18.08] | 39/39 | +18.79 [+17.27, +20.31] |
-| `both_loud` | 17.39 | 19.25 | 20.23 | +2.84 [+1.75, +4.23] | 34/39 | +0.76 [-1.84, +3.93] |
-| `both_diff` | 7.09 | 17.76 | 18.31 | +11.22 [+10.36, +12.00] | 39/39 | +16.36 [+14.90, +17.86] |
-| `offset_frac` | 22.26 | 23.75 | 48.74 | +26.48 [+23.38, +29.37] | 39/39 | +9.52 [+7.78, +11.21] |
-| `drift` | 22.47 | 23.76 | 45.00 | +22.53 [+20.02, +24.88] | 39/39 | +14.08 [+11.69, +16.40] |
-| `drift_fast` | 19.13 | 23.22 | 42.78 | +23.65 [+20.63, +26.37] | 38/39 | +23.21 [+20.21, +25.97] |
-| `wow` | 18.08 | 19.96 | 21.67 | +3.59 [+2.29, +4.72] | 33/39 | +7.51 [+5.36, +9.69] |
-| `mp3` | 19.54 | 19.45 | 19.87 | +0.33 [+0.04, +0.62] | 27/39 | -2.41 [-3.20, -1.58] |
-| `everything` | 6.19 | 14.81 | 15.07 | +8.87 [+8.14, +9.67] | 39/39 | +14.08 [+12.96, +15.30] |
+| Scenario | 3.0 | 4.0 | 4.1 | 4.3 | 4.3 − 3.0 [95 % CI] | 4.3 − 4.1 [95 % CI] | 4.3 vs 4.1: better / worse (worst) | leak, 4.3 better than 4.1 by |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `clean` | 23.67 | 23.78 | 49.71 | 49.71 | +26.04 [+22.90, +29.02] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `level` | 23.51 | 25.30 | 49.64 | 49.64 | +26.13 [+23.16, +28.95] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `inverted` | 23.67 | 23.78 | 47.01 | 47.01 | +23.34 [+20.87, +25.70] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `album_eq` | 5.45 | 22.62 | 31.06 | 31.06 | +25.61 [+24.19, +26.80] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `album_loud` | -4.37 | 11.65 | 12.73 | 12.78 | +17.16 [+16.14, +18.12] | +0.05 [+0.00, +0.15] | 1 / 0 (+0.00) | +0.04 [+0.00, +0.11] |
+| `both_loud` | 17.39 | 19.25 | 20.23 | 20.23 | +2.84 [+1.79, +4.18] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `both_diff` | 7.09 | 17.76 | 18.31 | 18.31 | +11.22 [+10.39, +12.02] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `offset_frac` | 22.26 | 23.75 | 48.74 | 48.74 | +26.48 [+23.56, +29.30] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift` | 22.47 | 23.76 | 45.00 | 45.00 | +22.53 [+20.16, +24.84] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift_fast` | 19.13 | 23.22 | 42.78 | 42.78 | +23.65 [+20.73, +26.35] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `wow` | 18.08 | 19.96 | 21.67 | 22.44 | +4.36 [+3.29, +5.49] | +0.77 [+0.25, +1.45] | 10 / 2 (-1.61) | +1.48 [+0.23, +3.01] |
+| `mp3` | 19.54 | 19.45 | 19.87 | 19.87 | +0.33 [+0.04, +0.60] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `everything` | 6.19 | 14.81 | 15.07 | 15.07 | +8.87 [+8.13, +9.65] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.00 [-0.00, +0.00] |
+| `kar_lowpass` | 21.12 | 21.22 | 26.74 | 32.44 | +11.32 [+9.42, +13.33] | +5.70 [+3.96, +7.55] | 33 / 0 (+0.00) | +11.14 [+8.93, +13.32] |
+| `stereo_width` | 16.90 | 17.60 | 16.38 | 43.35 | +26.45 [+21.78, +30.86] | +26.97 [+22.12, +31.58] | 32 / 0 (+0.00) | +30.50 [+25.36, +35.28] |
 
 Songs 11-50 are 40 songs; *Skelpolu - Resurrection* has no vocal in its excerpt, so its
 median SDR is undefined (it still counts for leak, where 36 songs have pauses).
@@ -281,7 +333,9 @@ songs 1-3 and 11-13, `--seconds 600 --start 0`), 4.1's lead over 3.0 per scenari
 / +33.6, `both_loud` +3.8 / +2.3, `both_diff` +12.4 / +10.7, `wow` +8.4 / +3.2,
 `everything` +7.6 / +9.3; 4.1 was better on every song in each of these. Against 4.0 it
 was 1.2-1.7 dB ahead on songs 1-3 and 0.2-0.5 dB behind on songs 11-13 where the
-releases' dynamics differ (`both_loud`, `both_diff`).
+releases' dynamics differ (`both_loud`, `both_diff`). 4.3 gave 4.1's results on the
+same songs and scenarios except `wow`, where its low-band start was taken on two songs:
++3.7 dB on one, -0.5 dB on the other.
 
 **Read with care:**
 
@@ -294,21 +348,29 @@ releases' dynamics differ (`both_loud`, `both_diff`).
   fixes, it was made on the dev songs. 4.1's settings were chosen on the dev songs; one
   4.1 fix (the drift test) came from a test song (*Little Chicago's Finest*) and the
   lossy-coding gate from the test songs' MP3 rows; both were adopted after the dev songs
-  confirmed them. The fixes are general, but the MUSDB
+  confirmed them. 4.3's additions were chosen on the dev songs; the wow test was then
+  checked on the test songs' `wow` rows (and kept), and a fourth change (`v43-eqq`,
+  under Soft decision) was dropped after the test songs' `album_eq` rows showed it
+  cost some of them vocal. The fixes are general, but the MUSDB
   numbers are optimistic by an unknown amount. The final synthetic songs are clean but
   synthetic. A clean real-music check
   would need songs nothing was tuned on, such as the MUSDB18-HQ training set (the same
   22.7 GB download).
-* **Where 4.1 is not better.** Wow can still defeat the tracking: with 2 s windows
-  against a 1.8 s wobble, the coarse curve can lose a stretch, and on one MUSDB song
-  (*Mu - Too Bright*) 4.1 is 9 dB below 3.0 on `wow` (three others lose 1-3 dB). On the
-  synthetic songs 4.1 is about 2 dB below 4.0 on `wow`: where the lag wobbles, the soft
-  decision keeps more of what the delete rule removed. With MP3 files, 4.1 leaves a
-  little more coding noise in the vocal's pauses than 3.0 (leak 1-2.5 dB higher) and
-  scores 0.5 dB below it on the synthetic songs; the `mp3` rows are approximate
-  (above). Keeping more of every cell also means that where the model is imperfect,
-  4.1 leaves a little more instrumental in the pauses than 4.0 (`album_eq`: about 10 dB
-  more leak than 4.0, still 29 dB less than 3.0).
+* **Where 4.3 is not better.** Wow can still defeat the tracking: with 2 s windows
+  against a 1.8 s wobble, the coarse curve can lose a stretch. 4.3's low-band start
+  recovers the worst MUSDB case (*Mu - Too Bright*: 4.1 was 9 dB below 3.0 on `wow`,
+  4.3 is 2 dB above it), but five songs are still up to 2 dB below 3.0. On the
+  synthetic songs 4.3 is about 1.2 dB below 4.0 on `wow`: where the lag wobbles, the
+  soft decision keeps more of what the delete rule removed. With MP3 files, 4.3 (like
+  4.1) leaves a little more coding noise in the vocal's pauses than 3.0 (leak 1-2.5 dB
+  higher) and scores 0.5 dB below it on the synthetic songs; the `mp3` rows are
+  approximate (above). Keeping more of every cell also means that where the model is
+  imperfect, 4.1 and 4.3 leave more instrumental in the pauses than 4.0 (`album_eq`:
+  about 10 dB more leak than 4.0, still 29 dB less than 3.0). Two ways of bringing that
+  down were tried for 4.3: fading frames whose residual is no more than the model's
+  typical error (the vocal's pauses), and reading the error higher where the EQ has
+  shape (`v43-eqq`). Both took vocal away on some songs, so neither was adopted.
 * **Speed.** The separation reads both files several times (lag search, tracking, the
   EQ's passes, level tracking, output), using all processor cores: a 3:20 song takes
-  19 s on a 16-thread desktop, against 6 s for 3.0.
+  about 22 s on a 16-thread desktop (26 s when the timing wobbles and both refinement
+  paths run), against 20 s for 4.1 and 6 s for 3.0.

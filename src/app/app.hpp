@@ -98,7 +98,7 @@ private:
     HWND lpf_chk_ = nullptr, lpf_ = nullptr, lpf_label_ = nullptr, hpf_chk_ = nullptr, hpf_ = nullptr, hpf_label_ = nullptr;
     HWND ovsp_chk_ = nullptr, ovsp_combo_ = nullptr, bsize_combo_ = nullptr;
     HWND kname_ = nullptr, vname_ = nullptr, vname_edit_ = nullptr;
-    HWND v4_chk_ = nullptr;
+    HWND v4_chk_ = nullptr, v4_inst_chk_ = nullptr;
     int lpf_label_right_ = 0, hpf_label_right_ = 0;
 };
 

@@ -49,6 +49,8 @@ struct Lang {
     const wchar_t *audio_files;  // the input dialogs' filter name
     const wchar_t *info_codec;   // the format label of a compressed file: rate, codec, channels
     const wchar_t *channels_n;   // more than two channels
+    // 4.3: the matched instrumental (Misc tab)
+    const wchar_t *v4_inst_check;
 };
 
 extern const Lang LANG_EN;

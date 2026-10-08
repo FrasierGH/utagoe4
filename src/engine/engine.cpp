@@ -499,7 +499,8 @@ Audio UtagoeRip::run() {
         // below 8 s the lag and drift estimates have too little to go on, and 3.0's
         // processing does better
         if (orig_.frames() >= 8 * (size_t)rate_) return run_v4();
-        log(L"v4: under 8 s, original processing");
+        log(cfg_.v4_inst ? L"v4: under 8 s, original processing (no matched instrumental)"
+                         : L"v4: under 8 s, original processing");
     }
     Audio empty;
     empty.rate = rate_, empty.channels = ch_;
@@ -720,6 +721,7 @@ Audio UtagoeRip::run_v4() {
     v4::Report rep;
     status(STATUS_ANALYZING);
     bool analysing = true;
+    std::vector<std::vector<double>> inst_out;
     auto y = v4::separate(planar(orig_), planar(*inst_), rate_, opt, &rep, [&](int pct) {
         if (analysing && pct >= 30) {
             analysing = false;
@@ -727,7 +729,16 @@ Audio UtagoeRip::run_v4() {
         }
         progress(pct / 100.0);
         return !(cb_.cancel && cb_.cancel());
-    });
+    }, cfg_.v4_inst ? &inst_out : nullptr);
+    if (!inst_out.empty()) {  // 16 bits, as the vocal
+        instrumental_.rate = rate_, instrumental_.channels = ch_;
+        instrumental_.data.resize(inst_out[0].size() * (size_t)ch_);
+        for (size_t i = 0; i < inst_out[0].size(); i++)
+            for (int c = 0; c < ch_; c++)
+                instrumental_.data[i * ch_ + c] =
+                    (int16_t)std::clamp(std::lround(inst_out[c][i] * 32768.0), -32768L, 32767L);
+        std::vector<std::vector<double>>().swap(inst_out);
+    }
     status(STATUS_NONE);
     if (y.empty()) {
         cancelled_ = true;
@@ -735,11 +746,13 @@ Audio UtagoeRip::run_v4() {
         empty.rate = rate_, empty.channels = ch_;
         return empty;
     }
-    wchar_t line[256];
-    swprintf(line, 256, L"v4 lag:%ld sign:%d drift:%ls start:%.2f end:%.2f stretch:%.2f%ls level:%ls gain:%.3f soft:%.2f",
-             rep.lag, rep.sign, rep.drift_line ? L"line" : L"tracked", rep.lag_start, rep.lag_end, rep.stretch,
+    wchar_t lp[48] = L"";
+    if (rep.lowpass_hz > 0) swprintf(lp, 48, L" kar-lowpass:%.0fHz", rep.lowpass_hz);
+    wchar_t line[320];
+    swprintf(line, 320, L"v4 lag:%ld sign:%d drift:%ls%ls start:%.2f end:%.2f stretch:%.2f%ls level:%ls gain:%.3f soft:%.2f%ls%ls",
+             rep.lag, rep.sign, rep.drift_line ? L"line" : L"tracked", rep.wow_lowband ? L" (from 500 Hz)" : L"", rep.lag_start, rep.lag_end, rep.stretch,
              rep.resampled ? L" (resampled)" : L"", rep.level_applied ? L"tracked" : L"fixed", rep.level_gain,
-             rep.soft_q);
+             rep.soft_q, rep.mimo ? L" eq:2x2" : L"", lp);
     log(line);
     std::vector<double> x[2];
     for (int c = 0; c < ch_; c++) {
