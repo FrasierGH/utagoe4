@@ -11,8 +11,8 @@
 Settings may only be tuned on the dev set; results are reported on the test set.
 
 Engines: "3.0" is the real Utagoe Rip 3.0 engine (tests/engine_test, default
-settings); "v4-cpp" is the C++ separation as the program runs it (tests/v4_cli: 4.3),
-"v41-cpp" the same as 4.1 (v4_cli --v41), "v40-cpp" as 4.0, with 4.0's EQ passes and
+settings); "v4-cpp" is the C++ separation as the program runs it (tests/v4_cli: 4.4),
+"v43-cpp" and "v41-cpp" the same as 4.3 and 4.1 (v4_cli --v43, --v41), "v40-cpp" as 4.0, with 4.0's EQ passes and
 3.0's keep-or-delete rule (v4_cli --hard);
 "ceiling" is the best
 achievable output where the target is approximate (MP3); the rest are prototypes
@@ -51,13 +51,16 @@ RATE = 44100
 # 'fresh' was added after fixes prompted by failures in 'test'; three of its songs were
 # then looked at while diagnosing fast drift. 'final' was added for 4.0's final numbers,
 # 'final41' for 4.1's (and scored after each of 4.1's last revisions); 'holdout41' was
-# added after them and scored once; 'holdout43' likewise for 4.3. Nothing was tuned on any
-# of these.
+# added after them and scored once; 'holdout43' and 'holdout44' likewise for 4.3 and 4.4.
+# Nothing was tuned on any of these.
 SYNTH_SEEDS = {'dev': range(1000, 1003), 'test': range(2000, 2010), 'fresh': range(3000, 3020),
                'final': range(4000, 4020), 'final41': range(5000, 5020), 'holdout41': range(6000, 6020),
-               'holdout43': range(7000, 7020)}
+               'holdout43': range(7000, 7020), 'holdout44': range(8000, 8020), 'tune': range(0), 'clean': range(0)}
+# With --stems: the MUSDB18-HQ test songs (dev, test), or the training songs (tune: the
+# first 50, which 4.4 was tuned on; clean: the other 50, scored once at the end).
 STEMS_SPLIT = {'dev': slice(0, 10), 'test': slice(10, None), 'fresh': slice(0, 0), 'final': slice(0, 0),
-               'final41': slice(0, 0), 'holdout41': slice(0, 0), 'holdout43': slice(0, 0)}
+               'final41': slice(0, 0), 'holdout41': slice(0, 0), 'holdout43': slice(0, 0),
+               'holdout44': slice(0, 0), 'tune': slice(0, 50), 'clean': slice(50, 100)}
 
 
 def _hash(*parts):
@@ -105,6 +108,8 @@ def load_stems(folder, seconds, start):
 
 
 def songs(args):
+    if args.set in ('tune', 'clean') and not (args.stems and os.path.basename(os.path.normpath(args.stems)).lower() == 'train'):
+        raise SystemExit(f'--set {args.set} is MUSDB18-HQ training songs: --stems .../train')
     if args.stems:
         dirs = [d for d in sorted(glob.glob(os.path.join(args.stems, '*'))) if os.path.exists(os.path.join(d, 'vocals.wav'))]
         dirs = dirs[STEMS_SPLIT[args.set]][: args.limit or None][args.shard_i::args.shard_n]
@@ -167,7 +172,7 @@ def engine_version(name):
 
 
 # the C++ separation's configurations (tests/v4_cli arguments)
-CPP_ARGS = {'v4-cpp': [], 'v41-cpp': ['--v41'], 'v40-cpp': ['--hard']}
+CPP_ARGS = {'v4-cpp': [], 'v43-cpp': ['--v43'], 'v41-cpp': ['--v41'], 'v40-cpp': ['--hard']}
 
 
 def run_engine(name, case):

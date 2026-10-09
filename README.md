@@ -54,30 +54,61 @@ and, since 4.3:
 In the benchmark's other scenarios 4.3's results are 4.1's, apart from one song that
 improved.
 
-| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4.0 | 4.1 | 4.3 |
-|---|---:|---:|---:|---:|
-| Identical instrumental | 23.7 | 23.8 | 49.7 | 49.7 |
-| Karaoke at a different level | 23.5 | 25.3 | 49.6 | 49.6 |
-| Karaoke with inverted polarity | 23.7 | 23.8 | 47.0 | 47.0 |
-| Album EQ'd for mastering | 5.5 | 22.6 | 31.1 | 31.1 |
-| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 | 12.7 | 12.8 |
-| Both mastered, each with its own dynamics | 17.4 | 19.3 | 20.2 | 20.2 |
-| Karaoke from a different master | 7.1 | 17.8 | 18.3 | 18.3 |
-| Fractional-sample offset | 22.3 | 23.8 | 48.7 | 48.7 |
-| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 | 45.0 / 42.8 | 45.0 / 42.8 |
-| Vinyl or tape wow | 18.1 | 20.0 | 21.7 | 22.4 |
-| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 | 15.1 | 15.1 |
-| Karaoke band-limited (nothing above 16 kHz) | 21.1 | 21.2 | 26.7 | 32.4 |
-| Karaoke with a narrower stereo image | 16.9 | 17.6 | 16.4 | 43.4 |
+and, since 4.4, **less leftover instrumental without taking vocal**, where the
+releases are not identical:
+
+* a **mastering EQ** that differs between the album and the karaoke is matched in
+  finer detail;
+* where the releases' **dynamics differ** (compressed or limited differently), or both
+  files are **lossy** (each with its own coding noise), the decision in the vocal's
+  pauses is taken over a few neighbouring cells, so scattered leftover instrumental is
+  removed while sung passages keep each cell's own decision;
+* level tracking no longer switches on for a loud, noise-like vocal on its own;
+* it takes about a third less time on most files (a 3:20 song in about 15 s instead
+  of 22).
+
+| Album vs karaoke release (30 s excerpts, median SDR in dB) | 3.0 | 4.0 | 4.1 | 4.3 | 4.4 |
+|---|---:|---:|---:|---:|---:|
+| Identical instrumental | 23.7 | 23.8 | 49.7 | 49.7 | 49.7 |
+| Karaoke at a different level | 23.5 | 25.3 | 49.6 | 49.6 | 49.6 |
+| Karaoke with inverted polarity | 23.7 | 23.8 | 47.0 | 47.0 | 47.0 |
+| Album EQ'd for mastering | 5.5 | 22.6 | 31.1 | 31.1 | 32.3 |
+| Album loudly mastered (EQ, compressor, limiter) | -4.4 | 11.7 | 12.7 | 12.8 | 12.9 |
+| Both mastered, each with its own dynamics | 17.4 | 19.3 | 20.2 | 20.2 | 20.2 |
+| Karaoke from a different master | 7.1 | 17.8 | 18.3 | 18.3 | 18.4 |
+| Fractional-sample offset | 22.3 | 23.8 | 48.7 | 48.7 | 48.7 |
+| Clock drift, 30 ppm / 300 ppm | 22.5 / 19.1 | 23.8 / 23.2 | 45.0 / 42.8 | 45.0 / 42.8 | 45.0 / 42.8 |
+| Vinyl or tape wow | 18.1 | 20.0 | 21.7 | 22.4 | 22.4 |
+| Remaster + level + offset + drift + MP3 | 6.2 | 14.8 | 15.1 | 15.1 | 15.2 |
+| Karaoke band-limited (nothing above 16 kHz) | 21.1 | 21.2 | 26.7 | 32.4 | 32.4 |
+| Karaoke with a narrower stereo image | 16.9 | 17.6 | 16.4 | 43.4 | 43.4 |
 
 Measured on MUSDB18-HQ test songs 11-50 (39 with a vocal in the excerpt), each
 release pair built from the song's stems; higher is better (each 10 dB is a tenth of
-the error energy). Synthetic songs give the same picture. Utagoe Rip 4 is not better everywhere:
+the error energy). Synthetic songs give the same picture. 4.4's change is mostly in what the
+vocal's pauses keep of the instrumental. On 50 songs nothing was tuned on (MUSDB18-HQ
+training songs 51-100), the leftover instrumental there (lower is better), with the
+vocal's median SDR beside it:
+
+| Album vs karaoke release | leftover, 4.3 | leftover, 4.4 | vocal, 4.3 | vocal, 4.4 |
+|---|---:|---:|---:|---:|
+| Album EQ'd for mastering | -40.4 dB | -41.5 dB | 30.7 | 31.7 |
+| Album loudly mastered | -20.6 dB | -21.5 dB | 13.8 | 13.8 |
+| Both mastered, each with its own dynamics | -45.4 dB | -45.9 dB | 20.3 | 20.3 |
+| Karaoke from a different master | -28.7 dB | -29.7 dB | 18.2 | 18.2 |
+| Both MP3 | -40.8 dB | -41.5 dB | 21.3 | 21.3 |
+| Remaster + level + offset + drift + MP3 | -26.1 dB | -27.3 dB | 15.8 | 15.8 |
+| Identical instrumental | -57.6 dB | -57.6 dB | 47.3 | 47.3 |
+
+Of these 350 song-and-release cases, the vocal gained more than 0.25 dB on 44 (up to
+3 dB), lost more than 0.25 dB on 2 (0.8 dB where a mastering EQ was matched finer, and
+1.4 dB on a loudly mastered album where 4.4's level tracking switched on), and stayed
+within 0.25 dB on the rest. The full tables are in [eval/README.md](eval/README.md#results). Utagoe Rip 4 is not better everywhere:
 see the limitations in [eval/README.md](eval/README.md#results) (on a few songs 3.0
 still copes better with wow; with MP3 files it leaves a little more coding noise in the
 vocal's pauses than 3.0; where the releases' EQ differs it leaves more leftover
-instrumental in the pauses than 4.0 did, in exchange for a fuller vocal; it takes three
-to four times as long).
+instrumental in the pauses than 4.0 did, in exchange for a fuller vocal; it takes 2.5
+to 4 times as long).
 
 How this was measured, and how the new separation works, is in
 [eval/README.md](eval/README.md). The separation is `src/engine/v4.cpp`; the Python

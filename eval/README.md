@@ -8,9 +8,10 @@ ear.
 pip install -r eval/requirements.txt          # numpy, scipy, soundfile; lame on the PATH for MP3
 cmake -S . -B build -A x64 && cmake --build build --config Release
 python eval/run.py                            # dev: 3 synthetic songs, all scenarios, all engines
-python eval/run.py --set holdout43            # 20 synthetic songs nothing was tuned on
-python eval/run.py --stems DIR --set test     # MUSDB18-HQ test songs 11-50
-python eval/run.py --set holdout43 --metric leak  # another metric (scores are cached)
+python eval/run.py --set holdout44            # 20 synthetic songs nothing was tuned on
+python eval/run.py --stems DIR/test --set test     # MUSDB18-HQ test songs 11-50
+python eval/run.py --stems DIR/train --set clean   # MUSDB18-HQ training songs 51-100 (held out)
+python eval/run.py --set holdout44 --metric leak  # another metric (scores are cached)
 ```
 
 Long runs can be split with `--shard i/n` (every n-th song); `--report` merges the
@@ -93,6 +94,13 @@ All ignore the first and last second (start-up and tail effects in every engine)
   once, with the final code. Nothing was tuned on them.
 * **holdout43**: synthetic seeds 7000-7019, added for 4.3 and scored once, with the
   final code. Nothing was tuned on them.
+* **holdout44**: synthetic seeds 8000-8019, likewise for 4.4.
+* **tune** (`--stems` on the MUSDB18-HQ *training* folder): training songs 1-50. 4.4's
+  changes were checked here before they were adopted (and a few settings chosen here),
+  so these songs are not a holdout.
+* **clean** (the same folder): training songs 51-100. Nothing was tuned or looked at on
+  them; they were scored once, with the final 4.4 code. This is the clean real-music
+  check the test songs could not be (below).
 
 ## Engines
 
@@ -107,13 +115,15 @@ All ignore the first and last second (start-up and tail effects in every engine)
 | `v4` | plus automatic level tracking: Utagoe Rip 4.0 |
 | `v41` | plus the EQ by Huber-weighted least squares and the soft decision: Utagoe Rip 4.1 |
 | `v43` | plus the 2x2 EQ for a different stereo image, a band-limited karaoke's top band and the low-band start for wow: Utagoe Rip 4.3 |
-| `v4-cpp` | the C++ port of `v43` (`src/engine/v4.cpp` through `tests/v4_cli`), what the program runs |
-| `v41-cpp`, `v40-cpp` | the same port run as 4.1 (`v4_cli --v41`) and as 4.0 (`v4_cli --hard`) |
+| `v44` | plus level tracking's test on unbiased cells, finer EQ matching for a shaped EQ difference, and the decision smoothed in the vocal's pauses where the releases' dynamics differ or both files are lossy: Utagoe Rip 4.4 |
+| `v4-cpp` | the C++ port of `v44` (`src/engine/v4.cpp` through `tests/v4_cli`), what the program runs |
+| `v43-cpp`, `v41-cpp`, `v40-cpp` | the same port run with 4.3's (`v4_cli --v43`), 4.1's (`--v41`) and 4.0's (`--hard`) settings; 4.4's faster transforms round differently, so these match the earlier releases to within rounding, not bit for bit |
 
 `proto.py` also keeps variants that were tried and not adopted (`proto-eq-ls1`,
 `proto-eq-align-lvl`, `proto-eq-align-auto`, `v4-cv`, `v43-eqq`), for reproducibility. `v4`
 (4.0) and `v41` share everything but the EQ estimate, the decision and the constant-lag
-test; `v43` is `v41` with three options turned on (`mimo`, `noref`, `wow`).
+test; `v43` is `v41` with three options turned on (`mimo`, `noref`, `wow`), and `v44` is
+`v43` with three more (`level_even`, `eq_fine`, `smooth`).
 
 ## How v4 works
 
@@ -213,9 +223,15 @@ then the power ratio of those cells. The first step matters in the vocal's pause
 compressor driven by the vocal works less there, the album's instrumental comes up by
 several dB, and an estimator that only looks at cells the current estimate already
 explains finds none. It is applied only when it holds up out of sample: estimated on
-the even frequency bins, it must cut the residual on the odd bins by more than 13 %.
-On the dev songs it cut it by at most 3.5 % without a dynamics difference and by at
-least 15.5 % with one.
+the even frequency bins, it must cut the residual on the odd bins by more than 9 %, in
+the odd bins whose even neighbour below the instrumental dominates. (Until 4.3 the odd
+bins chose their own cells, with a 13 % threshold. A loud vocal that partly cancels the
+instrumental in a bin makes it look dominated, which is the same bias the correction's
+own cell selection has, so a correction that only followed the bias passed the test:
+on a loud, noise-like vocal that came and went, level tracking switched on with no
+dynamics difference and cost 30 dB. Choosing the cells from the neighbouring bin, which
+the correction was fitted on, removes the shared bias.) On the dev songs the test read
+at most 1.6 % without a dynamics difference and at least 16.8 % with one.
 
 **Soft decision (4.1).** 3.0 keeps or deletes each time-frequency cell: it deletes a
 cell when the instrumental explains it (`cap * |K| > |O|` and the phases agree). That
@@ -236,6 +252,48 @@ sources and are treated as lossy in every scenario, which costs them in the case
 both files are identical (in practice an album and a karaoke track are coded
 separately). `s` is the Extractable Level setting over its
 default (1.2), doubled in Extraction Priority mode. 4.0 used 3.0's rule against `I`.
+
+**Finer EQ for a mastering EQ (4.4).** Where the model can otherwise be exact (no
+level tracking, a lag that is a line, no lossy coding) and the EQ difference has shape
+(the per-channel EQ, averaged over half an octave, more than 1.5 dB off its median
+somewhere between 100 Hz and 10 kHz), the EQ is fitted again at 1/6 octave instead of
+1/3, if that fit also predicts held-out frames at least as well (both fitted on the even
+frames, judged on the odd frames' cells the instrumental dominates). A mastering EQ has detail
+that 1/3-octave smoothing cannot follow, and what the model misses stays in the vocal's
+pauses as leftover instrumental, or is taken out with the vocal. A flat EQ (identical
+releases, a level difference) keeps 1/3 octave: there finer detail only adds
+estimation noise, which the soft decision then reads as model error (always matching
+finer cost identical releases up to 4 dB). Neither choosing the resolution per song out
+of sample alone nor shrinking the finer detail towards the coarse fit kept those cases
+safe; the shape test does, because it only fires where there is a shape to follow. The
+averaging matters: on one test song (*James Elder & Mark M Thompson*) an identical pair's
+estimate showed a 1.7 dB blip a few bins wide where the vocal and the accompaniment share
+notes, and the test without averaging fired (−2.7 dB). The held-out check catches the
+rarer case where a real EQ difference is present but the finer fit follows such a bias
+(two test songs that lost 1.1 and 2.4 dB).
+
+**The decision in the vocal's pauses (4.4).** Leftover instrumental in the vocal's
+pauses shows up as scattered cells whose residual happens to stand out from the
+model's typical error. Where the releases' dynamics differ (level tracking on) or both
+files are lossy (each with its own coding noise; both show a coder's low-pass), 4.4
+takes the decision over a neighbourhood in frames that look like pauses: the expected
+model error `s rho |I|^2` and the residual `|O - I|^2` are each averaged over 3 bins x 3
+frames before their ratio, so an isolated cell is judged with its quieter neighbours. A
+frame looks like a pause when its residual is under twice the model error it expects;
+frames where the vocal sings keep each cell's own decision, which is what keeps the
+vocal whole (taking every frame's decision over a neighbourhood removed as much
+leftover instrumental but cost songs whose vocal never pauses up to 2 dB). Not for a
+band-limited karaoke alone: only the karaoke shows a coder's low-pass there, and the
+model is otherwise exact.
+
+Tried for 4.4 and not adopted: the model error measured over a few seconds around each
+frame instead of over the whole song (no less leftover instrumental, some vocal lost);
+the decision's neighbourhood taking the lower of its gain and the cell's own in every
+frame (more leftover instrumental removed, up to 2 dB of vocal lost on songs whose
+vocal never pauses); level tracking's gain applied to the karaoke sample by sample
+instead of per frame (small, mixed); shorter second-pass tracking windows for wow, with
+or without an acceptance test (helped fast drift on some songs, lost up to 3 dB on
+others).
 
 Tried for 4.3 and not adopted (`v43-eqq`): where the model can be exact but the EQ
 difference has shape (more than 1.5 dB off its median between 100 Hz and 10 kHz),
@@ -275,54 +333,97 @@ python eval/run.py --stems D:/datasets/musdb18hq/test --set test
 
 ## Results
 
-4.3, 4.1 and 4.0 here are the C++ separation as the program runs it (`v4-cpp`), and
-as 4.1 and 4.0 ran it (`v41-cpp`, `v40-cpp`); the Python prototypes give the same
-output to -55 dB or better. Median SDR in dB, higher is better. The differences are
-per song, with a 95 % bootstrap confidence interval; "better / worse" counts the songs
-where 4.3 differs from 4.1 by more than 0.05 dB, with the worst difference. The last
-column is the same difference for leak (positive: 4.3 leaks less).
+4.4 and 4.3 here are the C++ separation as the program runs it (`v4-cpp`) and with
+4.3's settings (`v43-cpp`); the Python prototypes give the same output to -55 dB or
+better. Median SDR in dB, higher is better. The differences are per song, with a 95 %
+bootstrap confidence interval; "better / worse" counts the songs where 4.4 differs from
+4.3 by more than 0.05 dB, with the worst difference. The last column is the same
+difference for leak, the leftover instrumental in the vocal's pauses (positive: 4.4
+leaves less). (Measured with the code before the review's last fixes, which change
+nothing in these cases: the two builds' outputs were compared bit for bit on 135 of
+them.)
 
-**Holdout synthetic songs** (`holdout43`: 20, added last and scored once, nothing tuned on them):
+**MUSDB18-HQ training songs 51-100** (`clean`: 30 s excerpts, nothing tuned or looked
+at on them before they were scored; see Read with care):
 
-| Scenario | 3.0 | 4.0 | 4.1 | 4.3 | 4.3 − 3.0 [95 % CI] | 4.3 − 4.1 [95 % CI] | 4.3 vs 4.1: better / worse (worst) | leak, 4.3 better than 4.1 by |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `clean` | 27.50 | 27.56 | 57.56 | 57.56 | +30.05 [+29.14, +30.97] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `level` | 27.02 | 28.81 | 56.61 | 56.61 | +29.59 [+28.75, +30.46] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `inverted` | 27.48 | 27.56 | 50.83 | 50.83 | +23.35 [+22.58, +24.15] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `album_eq` | 3.18 | 25.98 | 31.67 | 31.67 | +28.49 [+27.92, +29.03] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `album_loud` | -3.86 | 9.43 | 10.81 | 10.81 | +14.67 [+14.05, +15.26] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `both_loud` | 22.08 | 22.88 | 23.80 | 23.80 | +1.71 [+1.04, +2.38] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `both_diff` | 7.66 | 22.53 | 22.75 | 22.75 | +15.09 [+14.37, +15.79] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `offset_frac` | 25.64 | 27.53 | 50.09 | 50.09 | +24.45 [+23.61, +25.37] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `drift` | 25.78 | 27.57 | 39.49 | 39.49 | +13.71 [+11.13, +16.41] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `drift_fast` | 19.41 | 26.63 | 31.68 | 31.68 | +12.27 [+11.06, +13.35] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `wow` | 17.52 | 24.28 | 22.86 | 23.07 | +5.55 [+4.98, +6.13] | +0.22 [+0.00, +0.52] | 3 / 0 (+0.00) | +0.98 [-0.14, +2.94] |
-| `mp3` | 19.50 | 18.97 | 18.90 | 18.90 | -0.60 [-0.70, -0.50] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `everything` | 6.56 | 15.24 | 16.14 | 16.14 | +9.59 [+9.29, +9.86] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `kar_lowpass` | 14.51 | 14.48 | 14.72 | 31.24 | +16.73 [+15.65, +17.74] | +16.52 [+15.41, +17.55] | 20 / 0 (+10.83) | +19.80 [+19.46, +20.12] |
-| `stereo_width` | 17.20 | 17.80 | 15.58 | 53.92 | +36.73 [+36.13, +37.29] | +38.34 [+37.79, +38.87] | 20 / 0 (+35.43) | +39.19 [+38.46, +39.91] |
+| Scenario | 3.0 | 4.3 | 4.4 | 4.4 − 3.0 [95 % CI] | 4.4 − 4.3 [95 % CI] | 4.4 vs 4.3: better / worse (worst) | leak, 4.4 better than 4.3 by |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `clean` | 23.80 | 47.33 | 47.32 | +23.52 [+21.05, +26.02] | -0.00 [-0.00, +0.00] | 0 / 0 (-0.04) | -0.05 [-0.12, +0.00] |
+| `level` | 23.65 | 47.23 | 47.23 | +23.58 [+21.14, +26.00] | -0.00 [-0.01, +0.00] | 0 / 1 (-0.16) | -0.02 [-0.06, +0.00] |
+| `inverted` | 23.18 | 45.46 | 45.45 | +22.27 [+19.79, +24.89] | -0.00 [-0.00, +0.00] | 0 / 0 (-0.03) | -0.04 [-0.10, +0.00] |
+| `album_eq` | 5.66 | 30.71 | 31.66 | +26.00 [+24.48, +27.37] | +0.95 [+0.71, +1.20] | 39 / 2 (-0.77) | +1.05 [+0.71, +1.43] |
+| `album_loud` | -4.36 | 13.81 | 13.83 | +18.19 [+17.19, +19.12] | +0.02 [-0.05, +0.08] | 16 / 1 (-1.37) | +0.85 [+0.44, +1.45] |
+| `both_loud` | 17.36 | 20.34 | 20.31 | +2.95 [+2.14, +3.99] | -0.03 [-0.05, -0.02] | 1 / 12 (-0.22) | +0.59 [+0.17, +1.02] |
+| `both_diff` | 6.54 | 18.20 | 18.24 | +11.70 [+10.85, +12.51] | +0.04 [+0.01, +0.08] | 11 / 3 (-0.19) | +1.09 [+0.81, +1.41] |
+| `offset_frac` | 23.05 | 46.81 | 46.81 | +23.76 [+21.32, +26.16] | -0.00 [-0.00, +0.00] | 0 / 0 (-0.03) | -0.05 [-0.12, +0.00] |
+| `drift` | 22.84 | 43.65 | 43.65 | +20.81 [+18.93, +22.69] | -0.00 [-0.00, +0.00] | 0 / 0 (-0.00) | +0.00 [-0.08, +0.09] |
+| `drift_fast` | 19.53 | 41.84 | 41.84 | +22.31 [+20.35, +24.18] | -0.00 [-0.00, +0.00] | 0 / 1 (-0.06) | -0.05 [-0.12, +0.00] |
+| `wow` | 18.61 | 23.73 | 23.73 | +5.12 [+4.19, +6.05] | +0.00 [-0.01, +0.01] | 1 / 1 (-0.13) | +0.01 [+0.00, +0.03] |
+| `mp3` | 20.19 | 21.34 | 21.34 | +1.16 [+0.72, +1.57] | +0.01 [-0.01, +0.02] | 3 / 2 (-0.11) | +0.68 [+0.51, +0.84] |
+| `everything` | 5.96 | 15.76 | 15.82 | +9.85 [+9.21, +10.52] | +0.06 [+0.02, +0.11] | 13 / 2 (-0.10) | +1.20 [+1.00, +1.42] |
+| `kar_lowpass` | 22.11 | 32.04 | 32.04 | +9.93 [+8.11, +11.73] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.03 [-0.08, +0.00] |
+| `stereo_width` | 17.66 | 35.96 | 35.96 | +18.31 [+13.68, +23.04] | +0.00 [+0.00, +0.00] | 1 / 0 (+0.00) | +0.05 [+0.00, +0.13] |
 
-The `holdout41`, `final41`, `final` and `fresh` songs give the same picture for 4.1.
+**MUSDB18-HQ training songs 1-50** (`tune`: 4.4's changes were checked on these before
+they were adopted):
+
+| Scenario | 3.0 | 4.3 | 4.4 | 4.4 − 3.0 [95 % CI] | 4.4 − 4.3 [95 % CI] | 4.4 vs 4.3: better / worse (worst) | leak, 4.4 better than 4.3 by |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `clean` | 24.33 | 48.39 | 48.39 | +24.06 [+21.61, +26.42] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `level` | 24.16 | 48.11 | 48.11 | +23.95 [+21.52, +26.34] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `inverted` | 23.63 | 46.64 | 46.64 | +23.01 [+20.62, +25.42] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `album_eq` | 5.83 | 30.77 | 31.88 | +26.04 [+24.27, +27.66] | +1.11 [+0.80, +1.44] | 36 / 0 (+0.00) | +0.95 [+0.61, +1.37] |
+| `album_loud` | -4.15 | 13.59 | 13.68 | +17.83 [+16.92, +18.76] | +0.09 [+0.04, +0.14] | 20 / 1 (-0.08) | +0.87 [+0.59, +1.19] |
+| `both_loud` | 17.41 | 19.63 | 19.62 | +2.21 [+1.61, +2.86] | -0.01 [-0.03, +0.00] | 2 / 7 (-0.17) | +0.93 [+0.43, +1.43] |
+| `both_diff` | 6.14 | 18.00 | 18.06 | +11.92 [+11.18, +12.75] | +0.06 [+0.03, +0.10] | 15 / 1 (-0.19) | +1.33 [+1.05, +1.60] |
+| `offset_frac` | 23.52 | 47.27 | 47.27 | +23.75 [+21.05, +26.35] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift` | 23.52 | 45.29 | 45.29 | +21.77 [+19.59, +23.90] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift_fast` | 20.67 | 43.08 | 43.08 | +22.42 [+19.76, +24.90] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `wow` | 20.26 | 25.04 | 25.04 | +4.77 [+3.72, +5.77] | -0.00 [-0.00, +0.00] | 0 / 0 (-0.00) | +0.00 [+0.00, +0.01] |
+| `mp3` | 20.70 | 21.68 | 21.69 | +0.98 [+0.65, +1.33] | +0.00 [-0.01, +0.01] | 2 / 1 (-0.21) | +0.78 [+0.59, +0.97] |
+| `everything` | 5.59 | 15.80 | 15.86 | +10.27 [+9.47, +11.13] | +0.06 [+0.03, +0.10] | 19 / 1 (-0.15) | +1.32 [+1.09, +1.52] |
+| `kar_lowpass` | 23.59 | 32.58 | 32.58 | +9.00 [+7.35, +10.74] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `stereo_width` | 16.76 | 42.41 | 42.43 | +25.67 [+21.70, +29.29] | +0.02 [+0.00, +0.05] | 1 / 0 (+0.00) | +0.04 [+0.00, +0.13] |
+
+**Holdout synthetic songs** (`holdout44`: 20, added last, nothing tuned on them):
+
+| Scenario | 3.0 | 4.3 | 4.4 | 4.4 − 3.0 [95 % CI] | 4.4 − 4.3 [95 % CI] | 4.4 vs 4.3: better / worse (worst) | leak, 4.4 better than 4.3 by |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `clean` | 27.21 | 56.85 | 56.85 | +29.65 [+28.82, +30.50] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `level` | 26.99 | 56.00 | 56.00 | +29.00 [+28.26, +29.75] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `inverted` | 27.19 | 50.35 | 50.35 | +23.16 [+22.32, +23.97] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `album_eq` | 3.76 | 32.55 | 35.52 | +31.76 [+31.48, +32.05] | +2.98 [+2.68, +3.29] | 20 / 0 (+2.02) | +3.30 [+2.76, +3.82] |
+| `album_loud` | -2.73 | 11.69 | 11.70 | +14.43 [+13.13, +15.51] | +0.01 [+0.00, +0.02] | 2 / 0 (-0.00) | +0.05 [+0.03, +0.08] |
+| `both_loud` | 22.07 | 23.65 | 23.60 | +1.53 [+0.88, +2.16] | -0.05 [-0.11, -0.00] | 0 / 3 (-0.50) | +0.09 [-0.28, +0.49] |
+| `both_diff` | 8.08 | 23.58 | 23.63 | +15.56 [+14.80, +16.27] | +0.05 [+0.01, +0.12] | 4 / 0 (-0.01) | +0.05 [+0.01, +0.09] |
+| `offset_frac` | 25.29 | 50.02 | 50.02 | +24.73 [+23.85, +25.50] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift` | 25.49 | 41.72 | 41.72 | +16.23 [+14.38, +18.04] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `drift_fast` | 19.08 | 32.59 | 32.59 | +13.51 [+12.50, +14.46] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `wow` | 17.68 | 22.56 | 22.56 | +4.88 [+4.17, +5.54] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `mp3` | 18.99 | 18.39 | 18.41 | -0.58 [-0.68, -0.48] | +0.02 [+0.00, +0.04] | 3 / 0 (-0.05) | +0.33 [+0.27, +0.38] |
+| `everything` | 6.92 | 16.22 | 16.25 | +9.33 [+8.95, +9.76] | +0.03 [+0.02, +0.04] | 4 / 0 (+0.00) | +0.39 [+0.31, +0.48] |
+| `kar_lowpass` | 14.59 | 31.51 | 31.51 | +16.93 [+15.89, +17.95] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
+| `stereo_width` | 17.17 | 53.51 | 53.51 | +36.34 [+35.70, +37.00] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
 
 **MUSDB18-HQ test songs 11-50** (30 s excerpts; 39 songs, see below):
 
-| Scenario | 3.0 | 4.0 | 4.1 | 4.3 | 4.3 − 3.0 [95 % CI] | 4.3 − 4.1 [95 % CI] | 4.3 vs 4.1: better / worse (worst) | leak, 4.3 better than 4.1 by |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `clean` | 23.67 | 23.78 | 49.71 | 49.71 | +26.04 [+22.90, +29.02] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `level` | 23.51 | 25.30 | 49.64 | 49.64 | +26.13 [+23.16, +28.95] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `inverted` | 23.67 | 23.78 | 47.01 | 47.01 | +23.34 [+20.87, +25.70] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `album_eq` | 5.45 | 22.62 | 31.06 | 31.06 | +25.61 [+24.19, +26.80] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `album_loud` | -4.37 | 11.65 | 12.73 | 12.78 | +17.16 [+16.14, +18.12] | +0.05 [+0.00, +0.15] | 1 / 0 (+0.00) | +0.04 [+0.00, +0.11] |
-| `both_loud` | 17.39 | 19.25 | 20.23 | 20.23 | +2.84 [+1.79, +4.18] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `both_diff` | 7.09 | 17.76 | 18.31 | 18.31 | +11.22 [+10.39, +12.02] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `offset_frac` | 22.26 | 23.75 | 48.74 | 48.74 | +26.48 [+23.56, +29.30] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `drift` | 22.47 | 23.76 | 45.00 | 45.00 | +22.53 [+20.16, +24.84] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `drift_fast` | 19.13 | 23.22 | 42.78 | 42.78 | +23.65 [+20.73, +26.35] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `wow` | 18.08 | 19.96 | 21.67 | 22.44 | +4.36 [+3.29, +5.49] | +0.77 [+0.25, +1.45] | 10 / 2 (-1.61) | +1.48 [+0.23, +3.01] |
-| `mp3` | 19.54 | 19.45 | 19.87 | 19.87 | +0.33 [+0.04, +0.60] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.00 [+0.00, +0.00] |
-| `everything` | 6.19 | 14.81 | 15.07 | 15.07 | +8.87 [+8.13, +9.65] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.00 [-0.00, +0.00] |
-| `kar_lowpass` | 21.12 | 21.22 | 26.74 | 32.44 | +11.32 [+9.42, +13.33] | +5.70 [+3.96, +7.55] | 33 / 0 (+0.00) | +11.14 [+8.93, +13.32] |
-| `stereo_width` | 16.90 | 17.60 | 16.38 | 43.35 | +26.45 [+21.78, +30.86] | +26.97 [+22.12, +31.58] | 32 / 0 (+0.00) | +30.50 [+25.36, +35.28] |
+| Scenario | 3.0 | 4.3 | 4.4 | 4.4 − 3.0 [95 % CI] | 4.4 − 4.3 [95 % CI] | 4.4 vs 4.3: better / worse (worst) | leak, 4.4 better than 4.3 by |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `clean` | 23.67 | 49.71 | 49.71 | +26.04 [+22.75, +29.20] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.05 [-0.13, +0.00] |
+| `level` | 23.51 | 49.64 | 49.64 | +26.13 [+22.97, +29.08] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.05 [-0.13, +0.00] |
+| `inverted` | 23.67 | 47.01 | 47.01 | +23.34 [+20.68, +25.80] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.05 [-0.12, +0.00] |
+| `album_eq` | 5.45 | 31.06 | 32.28 | +26.83 [+25.32, +28.17] | +1.22 [+0.82, +1.67] | 29 / 2 (-0.46) | +1.17 [+0.78, +1.59] |
+| `album_loud` | -4.37 | 12.78 | 12.85 | +17.22 [+16.20, +18.25] | +0.06 [+0.02, +0.12] | 11 / 0 (-0.01) | +0.58 [+0.36, +0.82] |
+| `both_loud` | 17.39 | 20.23 | 20.22 | +2.83 [+1.74, +4.22] | -0.01 [-0.03, +0.01] | 2 / 5 (-0.18) | +1.12 [+0.65, +1.67] |
+| `both_diff` | 7.09 | 18.31 | 18.37 | +11.28 [+10.44, +12.10] | +0.06 [+0.02, +0.11] | 11 / 1 (-0.05) | +1.11 [+0.84, +1.40] |
+| `offset_frac` | 22.26 | 48.74 | 48.74 | +26.48 [+23.36, +29.45] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.05 [-0.13, +0.00] |
+| `drift` | 22.47 | 45.00 | 45.00 | +22.53 [+20.00, +24.94] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.05 [-0.13, +0.00] |
+| `drift_fast` | 19.13 | 42.78 | 42.78 | +23.65 [+20.58, +26.52] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | -0.05 [-0.13, +0.00] |
+| `wow` | 18.08 | 22.44 | 22.44 | +4.36 [+3.29, +5.45] | -0.00 [-0.01, +0.00] | 0 / 1 (-0.13) | -0.01 [-0.05, +0.00] |
+| `mp3` | 19.54 | 19.87 | 19.88 | +0.34 [+0.05, +0.62] | +0.01 [-0.00, +0.02] | 2 / 1 (-0.08) | +0.86 [+0.63, +1.12] |
+| `everything` | 6.19 | 15.07 | 15.16 | +8.96 [+8.20, +9.74] | +0.09 [+0.05, +0.14] | 14 / 0 (-0.01) | +1.05 [+0.88, +1.22] |
+| `kar_lowpass` | 21.12 | 32.44 | 32.43 | +11.31 [+9.35, +13.28] | -0.01 [-0.02, +0.00] | 0 / 1 (-0.22) | -0.04 [-0.12, +0.00] |
+| `stereo_width` | 16.90 | 43.35 | 43.35 | +26.45 [+21.67, +31.08] | +0.00 [+0.00, +0.00] | 0 / 0 (+0.00) | +0.02 [-0.06, +0.13] |
 
 Songs 11-50 are 40 songs; *Skelpolu - Resurrection* has no vocal in its excerpt, so its
 median SDR is undefined (it still counts for leak, where 36 songs have pauses).
@@ -348,7 +449,12 @@ same songs and scenarios except `wow`, where its low-band start was taken on two
   fixes, it was made on the dev songs. 4.1's settings were chosen on the dev songs; one
   4.1 fix (the drift test) came from a test song (*Little Chicago's Finest*) and the
   lossy-coding gate from the test songs' MP3 rows; both were adopted after the dev songs
-  confirmed them. 4.3's additions were chosen on the dev songs; the wow test was then
+  confirmed them. 4.4's last revision (the averaged shape test and the held-out check
+  for the finer EQ) came from the test songs too. That revision was made after the
+  `clean` songs had been scored once with the code before it, so they were scored twice;
+  nothing was changed because of what they showed (one `album_loud` song lost 1.4 dB to
+  level tracking switching on under 4.4's threshold, and the threshold was left as
+  chosen on the dev songs). 4.3's additions were chosen on the dev songs; the wow test was then
   checked on the test songs' `wow` rows (and kept), and a fourth change (`v43-eqq`,
   under Soft decision) was dropped after the test songs' `album_eq` rows showed it
   cost some of them vocal. The fixes are general, but the MUSDB
@@ -372,5 +478,8 @@ same songs and scenarios except `wow`, where its low-band start was taken on two
   shape (`v43-eqq`). Both took vocal away on some songs, so neither was adopted.
 * **Speed.** The separation reads both files several times (lag search, tracking, the
   EQ's passes, level tracking, output), using all processor cores: a 3:20 song takes
-  about 22 s on a 16-thread desktop (26 s when the timing wobbles and both refinement
-  paths run), against 20 s for 4.1 and 6 s for 3.0.
+  about 15 s on a 16-thread desktop (18-23 s when the lag drifts or wobbles), against
+  22-26 s for 4.3 and 6 s for 3.0. 4.4's own transforms are faster (contiguous
+  twiddle tables, the largest ones split over threads), and the frame tracking computes
+  batches of windows in parallel from predicted starting points, checked in order, so
+  its result is the sequential one.

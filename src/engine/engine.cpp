@@ -748,11 +748,12 @@ Audio UtagoeRip::run_v4() {
     }
     wchar_t lp[48] = L"";
     if (rep.lowpass_hz > 0) swprintf(lp, 48, L" kar-lowpass:%.0fHz", rep.lowpass_hz);
+    if (rep.smoothed) wcscat_s(lp, 48, L" smoothed");
     wchar_t line[320];
     swprintf(line, 320, L"v4 lag:%ld sign:%d drift:%ls%ls start:%.2f end:%.2f stretch:%.2f%ls level:%ls gain:%.3f soft:%.2f%ls%ls",
              rep.lag, rep.sign, rep.drift_line ? L"line" : L"tracked", rep.wow_lowband ? L" (from 500 Hz)" : L"", rep.lag_start, rep.lag_end, rep.stretch,
              rep.resampled ? L" (resampled)" : L"", rep.level_applied ? L"tracked" : L"fixed", rep.level_gain,
-             rep.soft_q, rep.mimo ? L" eq:2x2" : L"", lp);
+             rep.soft_q, rep.mimo ? L" eq:2x2" : rep.eq_fine ? L" eq:fine" : L"", lp);
     log(line);
     std::vector<double> x[2];
     for (int c = 0; c < ch_; c++) {

@@ -68,6 +68,88 @@ size_t next_pow2(size_t n) {
     return p;
 }
 
+// The separation's FFT: radix-2, decimation in time, with each stage's twiddles stored
+// contiguously and the first two stages done as one radix-4 pass. The separation runs
+// thousands of transforms of up to 2^23 points, where dsp's FFT, which strides through
+// one shared twiddle table, spends most of its time waiting on memory. (3.0's
+// processing keeps dsp's FFT, so its output is unchanged.)
+class FastFFT {
+public:
+    // threads: for transforms of 2^18 points and more, each stage is split over this many
+    // threads (every butterfly of a stage is independent, so the result is the same)
+    explicit FastFFT(size_t n, size_t threads = 1) : n_(n), threads_(threads), rev_(n), tw_(std::max<size_t>(n, 2)) {
+        size_t bits = 0;
+        while (((size_t)1 << bits) < n) bits++;
+        for (size_t i = 0; i < n; i++) {
+            size_t r = 0;
+            for (size_t b = 0; b < bits; b++)
+                if (i & ((size_t)1 << b)) r |= (size_t)1 << (bits - 1 - b);
+            rev_[i] = r;
+        }
+        // the stage of half-length h uses tw_[h + j] = exp(-2 pi i j / 2h), j < h
+        for (size_t h = 1; h < n; h <<= 1)
+            for (size_t j = 0; j < h; j++) tw_[h + j] = std::polar(1.0, -PI * (double)j / (double)h);
+    }
+    size_t size() const { return n_; }
+    void forward(cplx* x) const { run<false>(x); }
+    void inverse(cplx* x) const { run<true>(x); }  // unnormalised
+
+private:
+    template <bool INV>
+    void run(cplx* x) const {
+        const size_t n = n_;
+        const size_t T = n >= ((size_t)1 << 18) ? std::max<size_t>(threads_, 1) : 1;
+        // [lo, hi) of `count` items for thread t of T
+        auto part = [](size_t count, size_t t, size_t T_) { return std::make_pair(count * t / T_, count * (t + 1) / T_); };
+        parallel_for(T, T, [&](size_t t, size_t) {  // each pair swapped by the owner of its lower index
+            auto [lo, hi] = part(n, t, T);
+            for (size_t i = lo; i < hi; i++)
+                if (i < rev_[i]) std::swap(x[i], x[rev_[i]]);
+        });
+        size_t h = 1;
+        if (n >= 4) {
+            parallel_for(T, T, [&](size_t t, size_t) {
+                auto [lo, hi] = part(n / 4, t, T);
+                for (size_t i = lo * 4; i < hi * 4; i += 4) {
+                    cplx a = x[i] + x[i + 1], b = x[i] - x[i + 1], c = x[i + 2] + x[i + 3], e = x[i + 2] - x[i + 3];
+                    cplx d = INV ? cplx(-e.imag(), e.real()) : cplx(e.imag(), -e.real());  // e * (+-i)
+                    x[i] = a + c, x[i + 2] = a - c, x[i + 1] = b + d, x[i + 3] = b - d;
+                }
+            });
+            h = 4;
+        }
+        for (; h < n; h <<= 1) {
+            const cplx* w = &tw_[h];
+            const size_t blocks = n / (2 * h);
+            auto fly = [&](size_t i, size_t j0, size_t j1) {
+                cplx* p = x + i;
+                cplx* q = p + h;
+                for (size_t j = j0; j < j1; j++) {
+                    cplx t = (INV ? std::conj(w[j]) : w[j]) * q[j];
+                    q[j] = p[j] - t;
+                    p[j] += t;
+                }
+            };
+            if (T == 1) {
+                for (size_t i = 0; i < n; i += 2 * h) fly(i, 0, h);
+            } else if (blocks >= T) {
+                parallel_for(T, T, [&](size_t t, size_t) {
+                    auto [lo, hi] = part(blocks, t, T);
+                    for (size_t bk = lo; bk < hi; bk++) fly(bk * 2 * h, 0, h);
+                });
+            } else {
+                parallel_for(T, T, [&](size_t t, size_t) {
+                    auto [lo, hi] = part(h, t, T);
+                    for (size_t bk = 0; bk < blocks; bk++) fly(bk * 2 * h, lo, hi);
+                });
+            }
+        }
+    }
+    size_t n_, threads_;
+    std::vector<size_t> rev_;
+    CVec tw_;
+};
+
 double median(std::vector<double> v) {
     if (v.empty()) return 0.0;
     size_t m = v.size() / 2;
@@ -97,7 +179,7 @@ std::vector<double> segment(const std::vector<double>& x, long long start, size_
 }
 
 // One-sided spectra (n/2 + 1 bins) of two real signals with one complex FFT.
-void rfft2(const std::vector<double>& x, const std::vector<double>& y, const FFT& f, CVec* X, CVec* Y) {
+void rfft2(const std::vector<double>& x, const std::vector<double>& y, const FastFFT& f, CVec* X, CVec* Y) {
     size_t n = f.size();
     CVec z(n);
     for (size_t i = 0; i < n; i++) z[i] = cplx(i < x.size() ? x[i] : 0.0, i < y.size() ? y[i] : 0.0);
@@ -112,7 +194,7 @@ void rfft2(const std::vector<double>& x, const std::vector<double>& y, const FFT
 }
 
 // numpy irfft: the inverse of a one-sided spectrum (imaginary parts of DC and Nyquist ignored).
-std::vector<double> irfft(const CVec& h, const FFT& f) {
+std::vector<double> irfft(const CVec& h, const FastFFT& f) {
     size_t n = f.size();
     CVec z(n);
     z[0] = cplx(h[0].real(), 0.0);
@@ -331,13 +413,13 @@ struct Track {
 // `seed` (default: the first) and tracks outwards; either polarity
 Track track_lags(const std::vector<double>& a, const std::vector<double>& b, double rate, long long lag0,
                  double win_sec = 2.0, double hop_sec = 1.0, int search = 64, int search0 = 512,
-                 size_t start = 0, size_t stop = SIZE_MAX, long long seed = -1) {
+                 size_t start = 0, size_t stop = SIZE_MAX, long long seed = -1, size_t threads = CHUNKS) {
     size_t W = (size_t)(win_sec * rate), H = (size_t)(hop_sec * rate);
     if (stop > a.size()) stop = a.size();
     std::vector<double> win(W);
     for (size_t i = 0; i < W; i++) win[i] = 0.5 - 0.5 * std::cos(2.0 * PI * (double)i / (double)(W - 1));
     size_t n = next_pow2(2 * W);
-    FFT f(n);
+    FastFFT f(n);
     std::vector<size_t> starts;
     long long last = std::max<long long>((long long)start + 1, (long long)stop - (long long)W + 1);
     for (long long s0 = (long long)start; s0 < last; s0 += (long long)H) starts.push_back((size_t)s0);
@@ -351,11 +433,13 @@ Track track_lags(const std::vector<double>& a, const std::vector<double>& b, dou
     }
     std::vector<size_t> order(starts.begin() + (long long)i0, starts.end());
     for (size_t i = i0; i-- > 0;) order.push_back(starts[i]);
-    Track tr;
-    long long centre = lag0, seed_lag = lag0;
-    int rng = search0;
-    for (size_t s : order) {
-        if (i0 > 0 && s == starts[i0 - 1]) centre = seed_lag, rng = search0;  // turning back
+    // one window: the lag searched within +-rng of centre, and its peak
+    struct Est {
+        bool ok = false;
+        double lag = 0, peak = 0;
+    };
+    auto estimate = [&](size_t s, long long centre, int rng) {
+        Est e;
         std::vector<double> sa = segment(a, (long long)s, W), sb = segment(b, (long long)s + centre, W);
         double ea = 0, eb = 0;
         for (size_t i = 0; i < W; i++) {
@@ -364,7 +448,7 @@ Track track_lags(const std::vector<double>& a, const std::vector<double>& b, dou
             ea += sa[i] * sa[i];
             eb += sb[i] * sb[i];
         }
-        if (ea < 1e-10 || eb < 1e-10) continue;
+        if (ea < 1e-10 || eb < 1e-10) return e;
         CVec SB, SA;
         rfft2(sb, sa, f, &SB, &SA);
         CVec X(n / 2 + 1), P(n / 2 + 1);
@@ -379,7 +463,7 @@ Track track_lags(const std::vector<double>& a, const std::vector<double>& b, dou
             if (std::fabs(r[(size_t)c]) > best) best = std::fabs(r[(size_t)c]), val = r[(size_t)c], d = c;
         for (int c = -rng; c < 0; c++)
             if (std::fabs(r[n + c]) > best) best = std::fabs(r[n + c]), val = r[n + c], d = c;
-        double pol = val >= 0 ? 1.0 : -1.0, peak = best;
+        double pol = val >= 0 ? 1.0 : -1.0;
         double num = 0, den = 0;
         for (size_t k = 0; k <= n / 2; k++) {
             double fhz = (double)k * rate / (double)n;
@@ -390,14 +474,95 @@ Track track_lags(const std::vector<double>& a, const std::vector<double>& b, dou
             num += w * om * ph;
             den += w * om * om;
         }
-        double lag = (double)centre + (double)d - num / den;
-        tr.centres.push_back((double)s + (double)W / 2);
-        tr.lags.push_back(lag);
-        tr.weights.push_back(peak);
-        if (peak > 0.5 * median(tr.weights) || tr.weights.size() < 3) {
-            centre = (long long)std::nearbyint(lag);
-            rng = search;
-            if (s == starts[i0]) seed_lag = centre;
+        e.ok = true;
+        e.lag = (double)centre + (double)d - num / den;
+        e.peak = best;
+        return e;
+    };
+    // at most ~300 MB of window buffers at a time (about 72 n bytes each; 15 at 44.1 kHz)
+    const size_t max_threads = std::max<size_t>(1, std::min<size_t>(threads, (size_t)(300e6 / (72.0 * (double)n))));
+    // The windows run in order, each searching around the previous confident estimate.
+    // Batches of them are computed in parallel, each from a predicted centre (a straight
+    // line through the last few confident estimates); checked in order, a window whose prediction
+    // proves wrong is computed again from the true state, so the result is exactly the
+    // sequential loop's.
+    Track tr;
+    long long centre = lag0, seed_lag = lag0;
+    int rng = search0;
+    std::vector<std::pair<double, double>> recent;  // (start, lag) of confident windows since the turn
+    // Where the rounding of a noisy lag makes a single guess unreliable, the neighbours of
+    // the predicted centre are computed too (spread 1); where even that keeps missing (a
+    // wobbling lag), the batches shrink towards the sequential loop, and grow again when
+    // the guesses hold.
+    size_t batch = threads > 1 ? 32 : 1;  // one thread: the plain sequential loop
+    long long spread = 0;
+    for (size_t pos = 0; pos < order.size();) {
+        size_t cnt = std::min(batch, order.size() - pos);
+        for (size_t j = 1; j < cnt; j++)  // a batch ends at the turn, where the state resets
+            if (i0 > 0 && order[pos + j] == starts[i0 - 1]) cnt = j;
+        std::vector<long long> pc(cnt);
+        std::vector<int> pr(cnt);
+        bool turn = i0 > 0 && order[pos] == starts[i0 - 1];
+        // the wide first search can move the centre far: alone; then small batches until
+        // there is a line to extrapolate
+        if (turn || tr.weights.empty()) cnt = 1;
+        if (recent.size() < 4) cnt = std::min<size_t>(cnt, 4);
+        for (size_t j = 0; j < cnt; j++) {
+            if (j == 0) {
+                pc[j] = turn ? seed_lag : centre;
+                pr[j] = turn ? search0 : rng;
+            } else if (recent.size() >= 2 && !turn) {
+                // a straight line through the last (up to) 8 confident estimates
+                size_t m = std::min<size_t>(8, recent.size());
+                double sx = 0, sy = 0, sxx = 0, sxy = 0;
+                for (size_t q = recent.size() - m; q < recent.size(); q++) {
+                    double x = recent[q].first - recent.back().first, y = recent[q].second;
+                    sx += x, sy += y, sxx += x * x, sxy += x * y;
+                }
+                double vx = sxx - sx * sx / (double)m, sl = vx > 0 ? (sxy - sx * sy / (double)m) / vx : 0.0;
+                double y0 = sy / (double)m - sl * sx / (double)m;
+                pc[j] = (long long)std::nearbyint(y0 + sl * ((double)order[pos + j - 1] - recent.back().first));
+                pr[j] = search;
+            } else {
+                pc[j] = !turn && !recent.empty() ? (long long)std::nearbyint(recent.back().second) : pc[0];
+                pr[j] = search;
+            }
+        }
+        const size_t K = (size_t)(2 * spread + 1);
+        std::vector<Est> est(cnt * K);
+        parallel_for(cnt * K, std::min(cnt * K, max_threads), [&](size_t i, size_t) {
+            size_t j = i / K;
+            est[i] = estimate(order[pos + j], pc[j] + (long long)(i % K) - spread, pr[j]);
+        });
+        size_t batch_miss = 0;
+        for (size_t j = 0; j < cnt; j++) {
+            size_t s = order[pos + j];
+            if (i0 > 0 && s == starts[i0 - 1]) {  // turning back
+                centre = seed_lag, rng = search0;
+                recent.clear();
+            }
+            bool hit = pr[j] == rng && std::llabs(centre - pc[j]) <= spread;
+            batch_miss += !hit;
+            Est e = hit ? est[j * K + (size_t)(centre - pc[j] + spread)] : estimate(s, centre, rng);
+            if (!e.ok) continue;
+            tr.centres.push_back((double)s + (double)W / 2);
+            tr.lags.push_back(e.lag);
+            tr.weights.push_back(e.peak);
+            if (e.peak > 0.5 * median(tr.weights) || tr.weights.size() < 3) {
+                centre = (long long)std::nearbyint(e.lag);
+                rng = search;
+                if (s == starts[i0]) seed_lag = centre;
+                recent.push_back({(double)s, e.lag});
+            }
+        }
+        pos += cnt;
+        if (threads <= 1) {
+        } else if (cnt > 1) {
+            if (batch_miss * 2 > cnt && spread == 1) batch = std::max<size_t>(batch / 2, 1);
+            spread = batch_miss * 4 > cnt ? 1 : batch_miss ? spread : 0;
+            if (batch_miss * 4 <= cnt) batch = std::min<size_t>(batch * 2, 32);
+        } else if (batch < 32 && batch_miss == 0) {
+            batch = 2;  // a single window that held: try a small batch again
         }
     }
     std::vector<size_t> idx(tr.centres.size());
@@ -514,21 +679,37 @@ struct Cand {
 
 // candidates sorted by a static trial subtraction below 1 kHz (proto._rank); each gets
 // the sign of its least-squares gain
-std::vector<Cand> rank(const std::vector<double>& al, std::vector<double> bl, const std::vector<long long>& lags) {
-    bl.resize(al.size(), 0.0);
-    std::vector<std::pair<std::pair<double, long long>, int>> scored;
-    std::vector<double> k(al.size());
-    for (long long lag : lags) {
-        for (size_t t = 0; t < al.size(); t++) {
-            long long s = (long long)t + lag;
-            k[t] = (s >= 0 && s < (long long)al.size()) ? bl[(size_t)s] : 0.0;
+std::vector<Cand> rank(const std::vector<double>& al, const std::vector<double>& bl, const std::vector<long long>& lags) {
+    // trial(al, bl shifted by lag, zeros past either end), without building the shifted copy
+    // (the same sums in the same order), the lags in parallel
+    const long long n = (long long)al.size(), nb = std::min<long long>((long long)bl.size(), n);
+    std::vector<std::pair<std::pair<double, long long>, int>> scored(lags.size());
+    parallel_for(lags.size(), std::min<size_t>(lags.size(), CHUNKS), [&](size_t i, size_t) {
+        long long lag = lags[i];
+        auto k = [&](long long t) {
+            long long s = t + lag;
+            return (s >= 0 && s < n && s < nb) ? bl[(size_t)s] : 0.0;
+        };
+        double kk = 0, ak = 0, aa = 0;
+        for (long long t = 0; t < n; t++) {
+            double kt = k(t);
+            kk += kt * kt, ak += al[(size_t)t] * kt, aa += al[(size_t)t] * al[(size_t)t];
         }
-        auto [res, g] = trial(al, k);
-        scored.push_back({{res, lag}, g >= 0 ? 1 : -1});
-    }
+        double res = INFINITY, g = 1.0;
+        if (kk > 0) {
+            g = ak / kk;
+            double r = 0;
+            for (long long t = 0; t < n; t++) {
+                double e = al[(size_t)t] - g * k(t);
+                r += e * e;
+            }
+            res = r / std::max(aa, 1e-20);
+        }
+        scored[i] = {{res, lag}, g >= 0 ? 1 : -1};
+    });
     std::sort(scored.begin(), scored.end());
     std::vector<Cand> out;
-    for (auto& s : scored) out.push_back({s.first.second, s.second});
+    for (auto& sc : scored) out.push_back({sc.first.second, sc.second});
     return out;
 }
 
@@ -540,7 +721,7 @@ std::vector<long long> window_peaks(const std::vector<double>& a, const std::vec
     if (a.size() < W) return out;
     size_t count = std::min<size_t>(16, (a.size() - W) / H + 1);
     size_t n = next_pow2(W + W + 2 * (size_t)m);
-    FFT f(n);
+    FastFFT f(n, 4);  // 4 windows at a time, 4 threads each
     std::vector<std::vector<long long>> found(count);
     parallel_for(count, std::min<size_t>(count, 4), [&](size_t i, size_t) {  // ~100 MB each
         size_t w0 = count > 1 ? (size_t)((double)i * (double)(a.size() - W) / (double)(count - 1)) : 0;
@@ -568,6 +749,7 @@ std::vector<long long> window_peaks(const std::vector<double>& a, const std::vec
 
 // global lag candidates, best trial subtraction first (proto.find_lag)
 std::vector<Cand> find_lags(const std::vector<double>& a, const std::vector<double>& b, double rate,
+                            const std::vector<double>& al, const std::vector<double>& bl,
                             double max_sec = MAX_LAG_SEC, size_t candidates = 6, long long sep = 256, double excerpt_sec = 60.0) {
     long long m = (long long)(max_sec * rate);
     size_t E = (size_t)(excerpt_sec * rate);
@@ -584,7 +766,7 @@ std::vector<Cand> find_lags(const std::vector<double>& a, const std::vector<doub
     }
     size_t n = next_pow2(ae.size() + be.size());
     {
-        FFT f(n);
+        FastFFT f(n, CHUNKS);
         CVec B, A;
         rfft2(be, ae, f, &B, &A);
         for (size_t k = 0; k < B.size(); k++) {
@@ -613,7 +795,7 @@ std::vector<Cand> find_lags(const std::vector<double>& a, const std::vector<doub
             if (cands.size() == candidates) break;
         }
     }
-    return rank(lowpass(a, rate), lowpass(b, rate), cands);
+    return rank(al, bl, cands);
 }
 
 // lag and polarity (proto.pick_tracked): whole-file candidates plus the best window
@@ -636,10 +818,12 @@ Pick pick_tracked(const std::vector<double>& a, const std::vector<double>& b, do
         cands.push_back(c);
         return true;
     };
-    for (const Cand& c : find_lags(a, b, rate)) add(c);
+    const std::vector<double> al = lowpass(a, rate), bl = lowpass(b, rate);
+    for (const Cand& c : find_lags(a, b, rate, al, bl)) add(c);
     // the windows look for drift and nearby repeats, within +-10 s
     long long mw = std::min(m, (long long)(10.0 * rate));
-    std::vector<Cand> extra = rank(lowpass(a, rate), lowpass(b, rate), window_peaks(a, b, rate, mw, 256));
+    std::vector<long long> wp = window_peaks(a, b, rate, mw, 256);
+    std::vector<Cand> extra = rank(al, bl, wp);
     size_t added = 0;
     for (const Cand& c : extra) {
         if (added == top_windows) break;
@@ -652,7 +836,7 @@ Pick pick_tracked(const std::vector<double>& a, const std::vector<double>& b, do
     for (size_t t = e0; t < e0 + E; t += 256) sub.push_back((double)t);
     std::vector<double> res(cands.size()), gain(cands.size()), lag_mid(cands.size());
     parallel_for(cands.size(), std::min<size_t>(cands.size(), 6), [&](size_t j, size_t) {
-        Track tr = track_lags(a, b, rate, cands[j].lag, 2.0, 1.0, 64, 512, e0, e0 + E, (long long)mid);
+        Track tr = track_lags(a, b, rate, cands[j].lag, 2.0, 1.0, 64, 512, e0, e0 + E, (long long)mid, 1);
         std::vector<double> curve;
         fit_lag_curve(tr, sub, rate, &curve);
         std::vector<double> pos(E);
@@ -682,7 +866,7 @@ struct Stft {
     size_t n = 0, frames = 0, C = 0;
     std::vector<double> win;
     double wsum = 0;
-    FFT fft{N};
+    FastFFT fft{N};
     explicit Stft(size_t len, size_t channels) : n(len), C(channels), win(N) {
         for (size_t j = 0; j < N; j++) win[j] = 0.5 - 0.5 * std::cos(2.0 * PI * (double)j / (double)N);
         wsum = std::accumulate(win.begin(), win.end(), 0.0);
@@ -1016,7 +1200,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
         for (size_t e = 0; e + kk < ne; e++) drop = std::max(drop, lvl[e] - lvl[e + kk]);
         return ne > kk && drop > 20.0;
     };
-    const bool coded = lossy(pa) || lossy(den);
+    const bool coded_a = lossy(pa), coded_b = lossy(den), coded = coded_a || coded_b;
     // A band-limited karaoke (a rip with a low-pass the original lacks): above its cut the
     // karaoke has nothing, so nothing there can be subtracted. Bins where its mean power is
     // 20 dB under its usual share of the mix's (1-8 kHz), those where the mix itself is
@@ -1090,30 +1274,24 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     // balance). Hm[c * 2 + d]: from karaoke channel d into channel c.
     bool use_mimo = false;
     std::vector<CVec> Hm;
-    if (opt.huber) {
-        // Huber-weighted least squares (proto._estimate_h_huber): each iteration, the median
-        // of |A - H B| per bin over the frames (from a histogram of log10 |r|, as
-        // proto._hist_median), then least squares with weights min(1, 1.5 median / |r|).
-        // Fitted side by side, in the same passes over the frames: [0] the per-channel EQ
-        // over all frames, and for stereo also [1] the same on the even frames, [2] the 2x2
-        // EQ on the even frames and [3] over all frames. The 2x2 EQ is used where, fitted on
-        // the even frames, it predicts the odd ones (the cells the instrumental dominates)
-        // with at least 20% less residual than the per-channel one; with the image the same
-        // its extra freedom only adds estimation noise.
-        struct Eq {
-            bool mimo, even;
-            std::vector<CVec> H;
-        };
-        std::vector<Eq> eqs = {{false, false, H}};
-        if (opt.mimo && C == 2) {
-            eqs.push_back({false, true, std::vector<CVec>(C, CVec(NB))});
-            eqs.push_back({true, true, std::vector<CVec>(4, CVec(NB))});
-            eqs.push_back({true, false, std::vector<CVec>(4, CVec(NB))});
-        }
+    // EQ models: per channel, or 2x2 (each output channel from both karaoke channels);
+    // over all frames or the even ones; smoothed over `oct` octaves
+    struct Eq {
+        bool mimo, even;
+        double oct;
+        std::vector<CVec> H;
+    };
+    auto predict_m = [&](const Eq& e, const std::vector<CVec>& B, size_t c, size_t b) -> cplx {
+        return e.mimo ? e.H[c * 2][b] * B[0][b] + e.H[c * 2 + 1][b] * B[1][b] : e.H[c][b] * B[c][b];
+    };
+    // Huber-weighted least squares (proto._estimate_h_huber) for every model in eqs, side
+    // by side in the same passes over the frames: each iteration, the median of |A - H B|
+    // per bin over the frames (from a histogram of log10 |r|, as proto._hist_median), then
+    // least squares with weights min(1, 1.5 median / |r|). The models before `ready` hold
+    // their first (unweighted) estimate already. Progress runs from pct0 to pct1; false
+    // when cancelled.
+    auto huber_fit = [&](std::vector<Eq>& eqs, size_t ready, int pct0, int pct1) -> bool {
         const size_t M = eqs.size();
-        auto predict_m = [&](const Eq& e, const std::vector<CVec>& B, size_t c, size_t b) -> cplx {
-            return e.mimo ? e.H[c * 2][b] * B[0][b] + e.H[c * 2 + 1][b] * B[1][b] : e.H[c][b] * B[c][b];
-        };
         const size_t NHB = 700;
         std::vector<double> hedges(NHB + 1);
         for (size_t e = 0; e < NHB; e++) hedges[e] = (double)e * (14.0 / (double)NHB) + -12.0;
@@ -1124,8 +1302,8 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
         };
         const size_t BLK = 64, CB = C * NB;
         std::vector<std::vector<double>> delta(M, std::vector<double>(CB, 0.0));
-        // weighted least squares for every model but those in `skip`; unweighted on the
-        // first call. Sums per channel: per-channel EQ nu, de; 2x2 EQ p0, p1, R00, R11, R01.
+        // weighted least squares for every model but those before `skip`; unweighted on
+        // the first call. Sums per channel: per-channel EQ nu, de; 2x2 EQ p0, p1, R00, R11, R01.
         auto fit = [&](bool first, size_t skip) {
             std::vector<std::vector<std::vector<CVec>>> acc(M);  // [model][chunk][slot][bin]
             for (size_t m = 0; m < M; m++)
@@ -1161,7 +1339,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                     CVec tt(NB, 0.0);
                     for (const auto& part : acc[m])
                         for (size_t b = 0; b < NB; b++) tt[b] += part[i][b];
-                    return smooth_bins(tt, opt.octave);
+                    return smooth_bins(tt, eqs[m].oct);
                 };
                 Eq& e = eqs[m];
                 for (size_t c = 0; c < C; c++) {
@@ -1188,7 +1366,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                 }
             }
         };
-        if (M > 1) fit(true, 1);  // the per-channel EQ over all frames is H already
+        if (ready < M) fit(true, ready);
         std::vector<double> rbuf(M * BLK * CB);
         std::vector<uint32_t> hist(M * CB * NHB);
         for (int it = 0; it < opt.huber_iters; it++) {
@@ -1222,8 +1400,26 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                 }
             }
             fit(false, 0);
-            if (!step(58 + 10 * (it + 1) / opt.huber_iters)) return {};
+            if (!step(pct0 + (pct1 - pct0) * (it + 1) / opt.huber_iters)) return false;
         }
+        return true;
+    };
+    if (opt.huber) {
+        // [0] the per-channel EQ over all frames, and for stereo also [1] the same on the
+        // even frames, [2] the 2x2 EQ (proto._estimate_h_mimo) on the even frames and [3]
+        // over all frames. The 2x2 EQ is for a karaoke whose stereo image differs from the
+        // mix's (another width or balance); it is used where, fitted on the even frames, it
+        // predicts the odd ones (the cells the instrumental dominates) with at least 20% less
+        // residual than the per-channel one; with the image the same its extra freedom only
+        // adds estimation noise. Hm[c * 2 + d]: from karaoke channel d into channel c.
+        std::vector<Eq> eqs = {{false, false, opt.octave, H}};
+        if (opt.mimo && C == 2) {
+            eqs.push_back({false, true, opt.octave, std::vector<CVec>(C, CVec(NB))});
+            eqs.push_back({true, true, opt.octave, std::vector<CVec>(4, CVec(NB))});
+            eqs.push_back({true, false, opt.octave, std::vector<CVec>(4, CVec(NB))});
+        }
+        const size_t M = eqs.size();
+        if (!huber_fit(eqs, 1, 58, 68)) return {};  // the per-channel EQ over all frames is H already
         H = eqs[0].H;
         if (M > 1) {
             std::vector<double> rd(CHUNKS, 0.0), rm(CHUNKS, 0.0);
@@ -1246,7 +1442,6 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
             rep.mimo = use_mimo;
             if (use_mimo) Hm = std::move(eqs[3].H);
         }
-        hist = std::vector<uint32_t>();
     } else {
         parallel_for(F, CHUNKS, [&](size_t k, size_t t) {
             std::vector<CVec> A, B;
@@ -1310,15 +1505,17 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                 std::vector<CVec> A, B;
                 st.frame(mix_in, k, 0.0, &A);
                 frame_kar(k, &B);
-                for (size_t c = 0; c < C; c++)
+                for (size_t c = 0; c < C; c++) {
+                    bool dom_below = false;  // the even bin just below dominated (opt.level_even)
                     for (size_t b = 0; b < NB; b++) {
                         cplx I = predict(B, c, b);
                         double aa = std::norm(A[c][b]);
-                        if (step == 0 && b % 2 == 1 && k >= EDGE && k + EDGE < F &&
-                            std::abs(I) * cap > std::abs(A[c][b])) {
+                        bool dom = std::abs(I) * cap > std::abs(A[c][b]);
+                        if (step == 0 && b % 2 == 1 && k >= EDGE && k + EDGE < F && (opt.level_even ? dom_below : dom)) {
                             double x = (A[c][b] * std::conj(I)).real();
                             oa[c][k] += aa, ox[c][k] += x, oi[c][k] += std::norm(I);
                         }
+                        dom_below = dom;
                         for (int set = 0; set < 2; set++) {
                             if (set == 1 && b % 2) continue;
                             cplx X = I * g[set][c][k];
@@ -1329,6 +1526,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                                 nu[set][c][k] += aa, de[set][c][k] += std::norm(X);
                         }
                     }
+                }
             });
             for (int set = 0; set < 2; set++)
                 for (size_t c = 0; c < C; c++) {
@@ -1358,6 +1556,72 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     }
     rep.level_applied = apply_level;
     if (!step(78)) return {};
+    // Where the model can otherwise be exact (no level tracking, a lag that is a line, no
+    // lossy coding), an EQ difference with shape (the per-channel EQ, averaged over half an
+    // octave, more than 1.5 dB off its median somewhere between 100 Hz and 10 kHz: a
+    // mastering EQ) is matched at a finer
+    // resolution, opt.eq_fine octaves: 1/3-octave smoothing cannot follow it exactly, and
+    // what it misses is left in the vocal. A flat EQ keeps 1/3 octave, where finer detail
+    // would only add estimation noise.
+    const bool inexact = apply_level || !rep.drift_line || coded;
+    if (opt.huber && opt.soft && opt.eq_fine > 0 && !inexact && !use_mimo) {
+        // up to 10 kHz, or a quarter octave below a band-limited karaoke's cut (the missing
+        // band would look like shape, and the averaging reaches a quarter octave)
+        const double f_hi = top_b0 < NB ? std::min(10000.0, (double)top_b0 * rate / (double)N / std::pow(2.0, 0.25)) : 10000.0;
+        // the shape (proto._eq_shaped): the per-channel EQ in dB, off its median between
+        // 100 Hz and 10 kHz, averaged over half an octave around each bin (smooth_bins'
+        // bands): broad curves stay, narrow blips (an estimate where the vocal and the
+        // accompaniment share notes) average out
+        double shape = 0;
+        for (size_t c = 0; c < C; c++) {
+            std::vector<double> mid;
+            CVec dev(NB), one(NB, 1.0);
+            for (size_t b = 0; b < NB; b++) {
+                double fhz = (double)b * rate / (double)N;
+                double db = 20 * std::log10(std::abs(H[c][b]) + 1e-12);
+                dev[b] = db;
+                if (fhz > 100 && fhz < f_hi) mid.push_back(db);
+            }
+            double md = median(mid);
+            for (size_t b = 0; b < NB; b++) dev[b] -= md;
+            CVec sd = smooth_bins(dev, 0.5), sn = smooth_bins(one, 0.5);
+            for (size_t b = 0; b < NB; b++) {
+                double fhz = (double)b * rate / (double)N;
+                if (fhz > 100 && fhz < f_hi) shape = std::max(shape, std::fabs(sd[b].real() / sn[b].real()));
+            }
+        }
+        if (shape > 1.5) {
+            // the finer fit must predict held-out frames at least as well: both fitted on the
+            // even frames, judged on the odd frames' cells the coarse one says the
+            // instrumental dominates (it can follow a bias where vocal and accompaniment
+            // share notes)
+            std::vector<Eq> trial = {{false, true, opt.octave, std::vector<CVec>(C, CVec(NB))},
+                                     {false, true, opt.eq_fine, std::vector<CVec>(C, CVec(NB))}};
+            if (!huber_fit(trial, 0, 78, 78)) return {};
+            std::vector<double> rc(CHUNKS, 0.0), rf(CHUNKS, 0.0);
+            parallel_for(F, CHUNKS, [&](size_t k, size_t t) {
+                if (k % 2 == 0) return;
+                std::vector<CVec> A, B;
+                st.frame(mix_in, k, 0.0, &A);
+                frame_kar(k, &B);
+                for (size_t c = 0; c < C; c++)
+                    for (size_t b = 0; b < NB; b++) {
+                        cplx ic = predict_m(trial[0], B, c, b);
+                        if (!(std::abs(ic) * cap > std::abs(A[c][b]))) continue;
+                        rc[t] += std::norm(A[c][b] - ic);
+                        rf[t] += std::norm(A[c][b] - predict_m(trial[1], B, c, b));
+                    }
+            });
+            double sc = 0, sf = 0;
+            for (size_t t = 0; t < CHUNKS; t++) sc += rc[t], sf += rf[t];
+            if (sf < sc) {
+                std::vector<Eq> fine = {{false, false, opt.eq_fine, std::vector<CVec>(C, CVec(NB))}};
+                if (!huber_fit(fine, 0, 78, 78)) return {};
+                H = std::move(fine[0].H);
+                rep.eq_fine = true;
+            }
+        }
+    }
 
     // --- soft decision (proto._soft_gain): the model error rho per band of 1/3 octave, a
     // quantile of log10 |A - I|^2 / |I|^2 over the cells the instrumental dominates; then
@@ -1401,7 +1665,7 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                 }
             }
         });
-        rep.soft_q = (apply_level || !rep.drift_line || coded) ? 0.5 : 0.10;
+        rep.soft_q = inexact ? 0.5 : 0.10;
         rho.assign(C, std::vector<double>(nbands, 1.0));
         std::vector<std::vector<char>> valid(C, std::vector<char>(nbands, 0));
         for (size_t c = 0; c < C; c++) {
@@ -1456,6 +1720,19 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
         }
     }
 
+    // In frames that look like the vocal's pauses (the frame's residual under `pause` times
+    // the model error it expects), the soft decision is taken over a neighbourhood of cells
+    // (ff bins x tt frames): the expected model error and the residual each averaged there
+    // before their ratio, and that gain is the cell's. An
+    // isolated cell of leftover instrumental is then judged with its quieter neighbours. In
+    // frames where the vocal sings, each cell keeps its own decision, so the vocal is not
+    // touched. For releases whose dynamics differ (level tracking on: opt.tf_level), and for
+    // pairs where both files are lossy, each with its own coding noise (opt.tf_coded).
+    v4::Smooth tf;
+    if (opt.soft && apply_level && opt.tf_level.kind) tf = opt.tf_level;
+    else if (opt.soft && coded_a && coded_b && opt.tf_coded.kind) tf = opt.tf_coded;
+    rep.smoothed = tf.kind;
+
     // --- subtraction (the soft decision, or with --hard 3.0's rule), inverse STFT
     // (scipy.signal.istft)
     std::vector<double> thr(NB);
@@ -1466,14 +1743,45 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
     std::vector<double> norm(ext, 0.0);
     const size_t BLOCK = 256;
     std::vector<CVec> zs(BLOCK, CVec(N)), zs_i(instrumental ? BLOCK : 0, CVec(N));
+    const size_t rf = (size_t)tf.ff / 2, rt = (size_t)tf.tt / 2;
     for (size_t k0 = 0; k0 < F; k0 += BLOCK) {
         size_t cnt = std::min(BLOCK, F - k0);
+        // the block's frames and, for the neighbourhood, rt more on either side: A - I, the
+        // expected model error strength rho |I|^2 and |A - I|^2 per cell, and per frame the
+        // ratio of the residual to the model error
+        const size_t lo = tf.kind ? (k0 >= rt ? k0 - rt : 0) : k0, hi = tf.kind ? std::min(F, k0 + cnt + rt) : k0;
+        std::vector<std::vector<CVec>> vv(hi - lo);
+        std::vector<std::vector<std::vector<double>>> ee(hi - lo), pp(hi - lo);
+        std::vector<double> pause_ratio(hi - lo, 0.0);
+        if (tf.kind)
+            parallel_for(hi - lo, CHUNKS, [&](size_t m, size_t) {
+                size_t k = lo + m;
+                std::vector<CVec> A, B;
+                st.frame(mix_in, k, 0.0, &A);
+                frame_kar(k, &B);
+                vv[m].assign(C, CVec(NB));
+                ee[m].assign(C, std::vector<double>(NB));
+                pp[m].assign(C, std::vector<double>(NB));
+                double se = 0, sp = 0;
+                for (size_t c = 0; c < C; c++) {
+                    double g = apply_level ? corr[c][k] : 1.0;
+                    for (size_t b = 0; b < NB; b++) {
+                        cplx I = predict(B, c, b) * g;
+                        vv[m][c][b] = A[c][b] - I;
+                        ee[m][c][b] = strength * rho[c][sband[b]] * std::norm(I);
+                        pp[m][c][b] = std::norm(vv[m][c][b]);
+                        se += ee[m][c][b], sp += pp[m][c][b];
+                    }
+                }
+                pause_ratio[m] = sp / (se / strength + 1e-30);
+            });
         parallel_for(cnt, CHUNKS, [&](size_t i, size_t) {
             size_t k = k0 + i;
             std::vector<CVec> A, B;
             st.frame(mix_in, k, 0.0, &A);
             frame_kar(k, &B);
             std::vector<CVec> V(C, CVec(NB)), Iv(instrumental ? C : 0, CVec(NB));
+            const bool smooth = tf.kind && pause_ratio[k - lo] < tf.pause;
             for (size_t c = 0; c < C; c++) {
                 double g = apply_level ? corr[c][k] : 1.0;
                 for (size_t b = 0; b < NB; b++) {
@@ -1481,6 +1789,20 @@ Planar separate(const Planar& mix_in, const Planar& kar_in, int rate_i, const Op
                     if (instrumental) Iv[c][b] = I;
                     if (use_share && b >= top_b0) {
                         V[c][b] = A[c][b] * share[c][k];
+                        continue;
+                    }
+                    if (smooth) {
+                        // scipy.ndimage.uniform_filter, mode 'nearest': indices clamped
+                        double se = 0, sp = 0;
+                        for (long long dt = -(long long)rt; dt <= (long long)rt; dt++) {
+                            size_t kk = (size_t)std::clamp((long long)k + dt, 0LL, (long long)F - 1) - lo;
+                            for (long long db = -(long long)rf; db <= (long long)rf; db++) {
+                                size_t bb = (size_t)std::clamp((long long)b + db, 0LL, (long long)NB - 1);
+                                se += ee[kk][c][bb], sp += pp[kk][c][bb];
+                            }
+                        }
+                        double gs = std::clamp(1 - se / (sp + 1e-30), 0.0, 1.0);
+                        V[c][b] = vv[k - lo][c][b] * gs;
                         continue;
                     }
                     if (opt.soft) {

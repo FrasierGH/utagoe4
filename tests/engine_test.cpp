@@ -386,6 +386,38 @@ int self_test() {
             std::printf("        band-limited karaoke: v4 SNR %.1f dB\n", xb);
             expect(logged(rbl, L"kar-lowpass:") && xb > 25, "v4: band-limited karaoke");
         }
+        {  // a karaoke from another master with a shaped EQ (a peak and a shelf): matched finer (4.4)
+            Song eqd = s;
+            auto biquad = [&](double f0, double gain_db, double q, bool shelf) {
+                double A = std::pow(10.0, gain_db / 40), w = 2 * PI * f0 / 44100.0, cw = std::cos(w), sw = std::sin(w);
+                double b0, b1, b2, a0, a1, a2;
+                if (!shelf) {  // RBJ peaking
+                    double al = sw / (2 * q);
+                    b0 = 1 + al * A, b1 = -2 * cw, b2 = 1 - al * A, a0 = 1 + al / A, a1 = -2 * cw, a2 = 1 - al / A;
+                } else {  // RBJ high shelf, S = 1
+                    double al = sw / 2 * std::sqrt(2.0), sa = 2 * std::sqrt(A) * al;
+                    b0 = A * ((A + 1) + (A - 1) * cw + sa), b1 = -2 * A * ((A - 1) + (A + 1) * cw);
+                    b2 = A * ((A + 1) + (A - 1) * cw - sa), a0 = (A + 1) - (A - 1) * cw + sa;
+                    a1 = 2 * ((A - 1) - (A + 1) * cw), a2 = (A + 1) - (A - 1) * cw - sa;
+                }
+                for (int c = 0; c < 2; c++) {
+                    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+                    for (size_t i = 0; i < frames; i++) {
+                        double x = eqd.inst.data[i * 2 + c];
+                        double y = (b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0;
+                        x2 = x1, x1 = x, y2 = y1, y1 = y;
+                        eqd.inst.data[i * 2 + c] = (int16_t)std::lround(std::max(-32768.0, std::min(32767.0, y)));
+                    }
+                }
+            };
+            biquad(900.0, 4.0, 1.0, false);
+            biquad(6000.0, -4.0, 0.7, true);
+            Run re = run(eqd, v);
+            double xe = snr(re.out, s.vocal);
+            std::printf("        EQ'd karaoke: v4 SNR %.1f dB\n", xe);
+            expect(logged(re, L"eq:fine") && xe > 30, "v4: EQ'd karaoke, matched finer");
+        }
+        expect(!logged(r, L"eq:fine"), "v4: an identical pair keeps 1/3 octave");
         v.cntr_flag = v.lpf_flag = v.hpf_flag = true;
         expect(run(s, v).out.frames() == s.orig.frames(), "v4: filters + centralization");
     }

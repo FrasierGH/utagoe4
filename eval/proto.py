@@ -490,13 +490,9 @@ def _eq_phase(A, B, rate, cap):
     return np.exp(1j * np.angle(H))[:, :, None]
 
 
-def _lowpass_share(out, A, B, rate):
-    """A band-limited karaoke (a rip with a low-pass the original lacks): above its cut the
-    karaoke has nothing, so nothing there can be subtracted. There the mix is kept in
-    proportion to the vocal's share of the half octave below the cut, frame by frame (the
-    vocal's air where it sings, nothing in its pauses).
-
-    The cut: bins where the karaoke's mean power is 20 dB under its usual share of the
+def _lowpass_cut(A, B, rate):
+    """A band-limited karaoke's cut (the first bin of its top band without reference), or
+    None. Bins where the karaoke's mean power is 20 dB under its usual share of the
     mix's (1-8 kHz), those where the mix itself is silent (-50 dB) counting either way,
     median of 9 bins; the top run of them, gaps under 500 Hz bridged, starting below
     20 kHz, 80% such bins, with at least 1 kHz of them where the mix is not silent, and
@@ -519,7 +515,7 @@ def _lowpass_share(out, A, B, rate):
         b -= 1
     if not (b0 < len(nr) and f[b0] < 20000 and np.mean(nr[b0:]) >= 0.8 and
             np.sum(low[b0:] & ~dead[b0:]) * rate / N >= 1000):
-        return out
+        return None
     # and the karaoke's own spectrum falls off a cliff there (20 dB from the 750 Hz below
     # the cut to the 750 Hz above it, 250 Hz either side left out): a dark arrangement
     # under a bright vocal also leaves the karaoke far under the mix up there, but its
@@ -527,9 +523,20 @@ def _lowpass_share(out, A, B, rate):
     lo = (f >= f[b0] - 1000) & (f < f[b0] - 250)
     hi = (f >= f[b0] + 250) & (f < f[b0] + 1000)
     if not (lo.any() and hi.any() and np.mean(pb[lo]) > 100 * np.mean(pb[hi])):
+        return None
+    return b0
+
+
+def _lowpass_share(out, A, B, rate, ref=None):
+    """A band-limited karaoke (a rip with a low-pass the original lacks): above its cut the
+    karaoke has nothing, so nothing there can be subtracted. There the mix is kept in
+    proportion to the vocal's share of the half octave below the cut, frame by frame (the
+    vocal's air where it sings, nothing in its pauses)."""
+    b0 = _lowpass_cut(A, B, rate)
+    if b0 is None:
         return out
     below = slice(int(b0 / 2 ** 0.5), b0)
-    po = np.sum(np.abs(out[:, below]) ** 2, axis=1)
+    po = np.sum(np.abs((out if ref is None else ref)[:, below]) ** 2, axis=1)   # (ref: the share's source)
     pm = np.sum(np.abs(A[:, below]) ** 2, axis=1)
     share = np.clip(ndimage.gaussian_filter1d(po, 1.0, axis=1, mode='nearest') /
                     (ndimage.gaussian_filter1d(pm, 1.0, axis=1, mode='nearest') + 1e-30), 0, 1)
@@ -650,11 +657,18 @@ def lossy(X, rate, lo=11000.0, hi=20500.0, step=250.0, width=1000.0, drop_db=20.
     return len(lvl) > k and float(np.max(lvl[:-k] - lvl[k:])) > drop_db
 
 
-def _soft_gain(A, I, cap, q, strength, rate):
+def _soft_gain(A, I, cap, q, strength, rate, smooth=None):
     """max(0, 1 - strength rho |I|^2 / |A - I|^2) per cell: rho is the model error, the
     q-quantile of |A - I|^2 / |I|^2 over the cells the instrumental dominates, per band
     (one value per band). An exact model (rho -> 0) subtracts and keeps
-    everything; a poor one suppresses cells where the residual is mostly model error."""
+    everything; a poor one suppresses cells where the residual is mostly model error.
+
+    smooth=(ff, tt, pause) (4.4): in frames that look like the vocal's pauses (the
+    frame's residual under `pause` times the model error it expects), the expected model
+    error strength rho |I|^2 and the residual |A - I|^2 are each averaged over ff bins x
+    tt frames before their ratio is taken, so an isolated cell of leftover instrumental
+    is judged with its quieter neighbours. Frames where the vocal sings keep each cell's
+    own decision."""
     pi, pv = np.abs(I) ** 2, np.abs(A - I) ** 2
     dom = np.abs(I) * cap > np.abs(A)
     band, nbands = _soft_bands(A.shape[1], rate)
@@ -677,7 +691,16 @@ def _soft_gain(A, I, cap, q, strength, rate):
         rho[:, b] = np.where(valid[:, b], rho[:, b], rho[:, b - 1])
         valid[:, b] |= valid[:, b - 1]
     rb = rho[:, band][:, :, None]
-    return np.clip(1 - strength * rb * pi / (pv + 1e-30), 0.0, 1.0)
+    e = strength * rb * pi
+    g = np.clip(1 - e / (pv + 1e-30), 0.0, 1.0)
+    if smooth:
+        ff, tt, pause = smooth
+        se = ndimage.uniform_filter(e, size=(1, ff, tt), mode='nearest')
+        sv = ndimage.uniform_filter(pv, size=(1, ff, tt), mode='nearest')
+        gs = np.clip(1 - se / (sv + 1e-30), 0.0, 1.0)
+        ratio = np.sum(pv, axis=(0, 1)) / (np.sum(e, axis=(0, 1)) / strength + 1e-30)
+        g = np.where((ratio < pause)[None, None, :], gs, g)
+    return g
 
 
 def _estimate_h(A, B, g, cap, octave, passes, mag, iters=4):
@@ -745,11 +768,34 @@ def _level_track(A, I, cap, sigma_frames=2.0, bins=slice(None)):
     return np.clip(c0 * np.clip(c1 * r, 0.25, 4.0), 0.25, 4.0)
 
 
-def _level_gain(A, I, cap, c):
+def _eq_shaped(H, rate, f_hi=10000.0, db_limit=1.5):
+    """An EQ difference with shape (4.4): the per-channel EQ, averaged over half an octave
+    around each bin, more than `db_limit` off its median somewhere between 100 Hz and
+    f_hi (10 kHz, or a quarter octave below a band-limited karaoke's cut, where the
+    missing band would look like shape). Averaging leaves broad curves (shelves, wide
+    peaks: a mastering EQ) and removes narrow blips, which an estimate can show where the
+    vocal and the accompaniment share notes."""
+    f = np.arange(H.shape[1]) * rate / N
+    sel = (f > 100) & (f < f_hi)
+    db = 20 * np.log10(np.abs(H) + 1e-12)
+    dev = db - np.median(db[:, sel], axis=1, keepdims=True)
+    sm = np.real(_smooth_bins(dev, 1 / 2) / _smooth_bins(np.ones_like(dev), 1 / 2))
+    return float(np.max(np.abs(sm[:, sel]))) > db_limit
+
+
+def _level_gain(A, I, cap, c, even=False):
     """How much the correction c cuts the residual |A - c I|^2 on the odd bins, in the
-    cells the instrumental dominates (1 - after / before)."""
+    cells the instrumental dominates (1 - after / before). even=True (4.4): dominated in
+    the even bin just below, the correction's own bins. Chosen by the odd bin itself, a
+    loud vocal that partly cancels the instrumental there makes the cell look dominated,
+    the same bias the correction's own cell selection has, so a correction that only
+    follows that bias passes the test."""
     a, i = A[:, 1::2], I[:, 1::2]
-    w = np.abs(i) * cap > np.abs(a)
+    if even:
+        ae, ie = A[:, 0:-1:2][:, :a.shape[1]], I[:, 0:-1:2][:, :a.shape[1]]
+        w = np.abs(ie) * cap > np.abs(ae)
+    else:
+        w = np.abs(i) * cap > np.abs(a)
     e = slice(N // HOP // 2, -(N // HOP // 2))     # not the frames reaching past an end
     pa = np.sum(np.where(w, np.abs(a) ** 2, 0), axis=1)[:, e]          # (ch, frames)
     x = np.sum(np.where(w, np.real(a * np.conj(i)), 0), axis=1)[:, e]
@@ -776,7 +822,8 @@ def stretch(frame_lag):
 
 def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.2, quality=True,
              octave=1 / 3, passes=2, mag='power', align='global', lvl_gain=0.13, decision='hard', soft_q=0.5,
-             huber_iters=4, soft_q_lo=0.10, const_lag=0.0, mimo=False, eq_q=None, noref=False, wow=False):
+             huber_iters=4, soft_q_lo=0.10, const_lag=0.0, mimo=False, eq_q=None, noref=False, wow=False,
+             level_even=False, eq_fine=None, smooth=None):
     """Returns the vocal estimate (same shape as mix)."""
     n = len(mix)
     if n == 0 or len(kar) == 0 or not np.any(kar):                # nothing to align
@@ -841,7 +888,8 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
     level_applied = False
     if track:
         c = _level_track(A, I, cap)
-        if track != 'auto' or _level_gain(A, I, cap, _level_track(A, I, cap, bins=slice(0, None, 2))) > lvl_gain:
+        if track != 'auto' or _level_gain(A, I, cap, _level_track(A, I, cap, bins=slice(0, None, 2)),
+                                          level_even) > lvl_gain:
             I = I * c[:, None, :]
             mag_i = np.abs(I)
             level_applied = True
@@ -863,6 +911,26 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
             coded = lossy(A, rate) or lossy(B, rate)
             inexact = level_applied or not line or coded
             q = 0.5 if inexact else soft_q_lo
+            cut = _lowpass_cut(A, B, rate) if (eq_fine and noref) else None
+            f_hi = 10000.0 if cut is None else min(10000.0, cut * rate / N / 2 ** 0.25)
+            if eq_fine and not inexact and eq == 'perbin' and not mimo_used and _eq_shaped(Hd, rate, f_hi):
+                # 4.4: where the model can otherwise be exact, an EQ difference with shape
+                # (a mastering EQ) is matched at the finer resolution `eq_fine` (octaves):
+                # 1/3-octave smoothing cannot follow it exactly, and what it misses stays in
+                # the vocal. A flat EQ keeps 1/3 octave, where finer detail only adds noise.
+                # The finer fit must also predict held-out frames at least as well (fitted on
+                # the even frames, judged on the odd frames' cells the instrumental dominates):
+                # where the vocal and the accompaniment share notes, it can follow a bias.
+                ev, od = slice(0, None, 2), slice(1, None, 2)
+                Ic = _estimate_h(A[:, :, ev], B[:, :, ev], g, cap, oct_, passes, mag, huber_iters)[:, :, None] * B[:, :, od]
+                If = _estimate_h(A[:, :, ev], B[:, :, ev], g, cap, eq_fine, passes, mag, huber_iters)[:, :, None] * B[:, :, od]
+                dom = np.abs(Ic) * cap > np.abs(A[:, :, od])
+                rc = np.sum(np.where(dom, np.abs(A[:, :, od] - Ic) ** 2, 0))
+                rf = np.sum(np.where(dom, np.abs(A[:, :, od] - If) ** 2, 0))
+                if rf < rc:
+                    Hd = _estimate_h(A, B, g, cap, eq_fine, passes, mag, huber_iters)
+                    I = Hd[:, :, None] * B
+                    V = A - I
             if not inexact and eq_q and eq == 'perbin' and not mimo_used:
                 # an EQ difference with shape (not just a level; more than 1.5 dB off the
                 # median between 100 Hz and 10 kHz): 1/3-octave smoothing cannot follow it
@@ -874,9 +942,15 @@ def separate(mix, kar, rate=44100, eq='scalar', kill='raw', track=False, kvol=1.
                     q = eq_q
         else:
             q = soft_q
-        out = V * _soft_gain(A, I, cap, q, strength, rate)
+        # 4.4: the decision smoothed in the vocal's pauses, for releases whose dynamics
+        # differ (level tracking on) and pairs where both files are lossy (each its own
+        # coding noise)
+        sm = smooth if smooth and (level_applied or (lossy(A, rate) and lossy(B, rate))) else None
+        out = V * _soft_gain(A, I, cap, q, strength, rate, sm)
         if noref:
-            out = _lowpass_share(out, A, B, rate)
+            # (the vocal's share below the cut from the cells' own decisions)
+            ref = V * _soft_gain(A, I, cap, q, strength, rate) if sm else out
+            out = _lowpass_share(out, A, B, rate, ref=ref)
         return _istft(out, n)
     kill_mask = mag_i * cap > np.abs(A)
     if quality:
@@ -908,6 +982,13 @@ ENGINES = {
     # the vocal's share, the low-band start for wow where it fits clearly better
     'v43': dict(eq='perbin', align='track', track='auto', mag='huber', huber_iters=2, decision='soft', soft_q='gated',
                 soft_q_lo=0.10, const_lag=0.1, mimo=True, noref=True, wow=True),
+    # 4.4: level tracking's test on cells chosen by the even bin below; a shaped EQ
+    # difference matched at 1/6 octave where the model can otherwise be exact; the soft
+    # decision smoothed over 3 x 3 cells in the vocal's pauses where the releases' dynamics
+    # differ or both files are lossy
+    'v44': dict(eq='perbin', align='track', track='auto', mag='huber', huber_iters=2, decision='soft', soft_q='gated',
+                soft_q_lo=0.10, const_lag=0.1, mimo=True, noref=True, wow=True, level_even=True, lvl_gain=0.09,
+                eq_fine=1 / 6, smooth=(3, 3, 2.0)),
     # tried for 4.3: the model error read at 0.25 where the EQ difference has shape (less
     # leftover instrumental on album_eq, but up to 4.8 dB less vocal on some MUSDB songs)
     'v43-eqq': dict(eq='perbin', align='track', track='auto', mag='huber', huber_iters=2, decision='soft',

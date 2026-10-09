@@ -10,18 +10,31 @@
 namespace utagoe {
 namespace v4 {
 
+// The soft decision smoothed over neighbouring cells, in frames that look like the vocal's
+// pauses (4.4): kind 0 off, 1 on
+struct Smooth {
+    int kind = 0;
+    int ff = 3, tt = 3;   // bins x frames (odd)
+    double pause = 2.0;   // a frame counts as a pause below this residual / model error
+};
+
 struct Options {
     double kvol = 1.2;        // Extractable Level (3.0's kvol); cap = min(kvol, 1.5)
     bool quality = true;      // Accuracy Priority: Quality (phase test) or Extraction
     double octave = 1.0 / 3;  // EQ smoothing
     int level_track = 2;      // 0 off, 1 always, 2 auto (when it holds up out of sample)
-    double lvl_gain = 0.13;   // auto: estimated on even bins, must cut the odd bins' residual this much
+    double lvl_gain = 0.09;   // auto: estimated on even bins, must cut the odd bins' residual this much
+    bool level_even = true;   // ... in the odd bins whose even neighbour below the instrumental
+                              // dominates (4.4; 4.0-4.3: those the instrumental dominates, 0.13)
     bool huber = true;        // EQ by Huber-weighted least squares (4.1); false: 4.0's two passes
     int huber_iters = 2;
     bool soft = true;         // soft decision per cell (4.1); false: 3.0's keep-or-delete rule
     double const_lag = 0.1;   // a fitted drift under this many samples counts as none (4.1; 4.0: 0)
     bool noref = true;        // a band-limited karaoke: the mix above its cut by the vocal's share (4.3)
     bool wow = true;          // a wobbling lag: also try the refinement from below 500 Hz (4.3)
+    double eq_fine = 1.0 / 6;  // a shaped EQ difference, model otherwise exact: this resolution (4.4; 0: off)
+    Smooth tf_level{1, 3, 3, 2.0};  // releases whose dynamics differ (level tracking on) (4.4)
+    Smooth tf_coded{1, 3, 3, 2.0};  // both files lossy, each with its own coding noise (4.4)
     bool mimo = true;         // stereo: a 2x2 EQ where it predicts clearly better (4.3; needs huber)
 };
 
@@ -37,6 +50,8 @@ struct Report {
     double soft_q = 0;         // soft decision: the quantile the model error was read at (0: hard rule)
     bool wow_lowband = false;  // the lag's refinement started below 500 Hz (a wobble out of range)
     double lowpass_hz = 0;     // the karaoke's cut, where it is band-limited (0: it is not)
+    bool eq_fine = false;      // the EQ was matched at opt.eq_fine (a shaped EQ difference)
+    int smoothed = 0;          // the soft decision's neighbourhood smoothing used (Smooth::kind)
     bool mimo = false;         // the 2x2 EQ was used (the karaoke's stereo image differs)
 };
 

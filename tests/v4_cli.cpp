@@ -1,4 +1,5 @@
-// v4_cli ORIG KARAOKE OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard] [--v41] [--inst INST.wav]
+// v4_cli ORIG KARAOKE OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard] [--v41] [--v43] [--inst INST.wav]
+//        [--progress]
 //
 // Runs the Utagoe Rip 4 separation (src/engine/v4.cpp) on two audio files (any format
 // the program reads) and prints what the alignment found. eval/run.py uses it as engine
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
+#include <functional>
 #include <vector>
 
 #include "engine/audio_io.hpp"
@@ -24,11 +26,12 @@ using namespace utagoe;
 int wmain(int argc, wchar_t** argv) {
     if (argc < 4) {
         std::fprintf(stderr, "usage: v4_cli ORIG KARAOKE OUT.wav [--level off|on|auto] [--kvol X] [--extraction] [--hard] "
-                             "[--v41] [--inst INST.wav]\n");
+                             "[--v41] [--v43] [--inst INST.wav] [--progress]\n");
         return 1;
     }
     v4::Options opt;
     const wchar_t* inst_path = nullptr;
+    bool show_progress = false;
     for (int i = 4; i < argc; i++) {
         if (!wcscmp(argv[i], L"--level") && i + 1 < argc) {
             const wchar_t* v = argv[++i];
@@ -39,10 +42,23 @@ int wmain(int argc, wchar_t** argv) {
             opt.quality = false;
         } else if (!wcscmp(argv[i], L"--inst") && i + 1 < argc) {  // also write the matched instrumental
             inst_path = argv[++i];
-        } else if (!wcscmp(argv[i], L"--v41")) {  // Utagoe Rip 4.1: without 4.3's additions
-            opt.mimo = opt.noref = opt.wow = false;
+        } else if (!wcscmp(argv[i], L"--progress")) {  // each progress step and its time, to stderr
+            show_progress = true;
+        } else if (!wcscmp(argv[i], L"--v43")) {  // Utagoe Rip 4.3: its level test, no finer EQ or smoothing
+            opt.level_even = false;
+            opt.lvl_gain = 0.13;
+            opt.eq_fine = 0.0;
+            opt.tf_level.kind = opt.tf_coded.kind = 0;
+        } else if (!wcscmp(argv[i], L"--v41")) {  // Utagoe Rip 4.1: without 4.3's and 4.4's additions
+            opt.mimo = opt.noref = opt.wow = opt.level_even = false;
+            opt.lvl_gain = 0.13;
+            opt.eq_fine = 0.0;
+            opt.tf_level.kind = opt.tf_coded.kind = 0;
         } else if (!wcscmp(argv[i], L"--hard")) {  // Utagoe Rip 4.0: 4.0's EQ passes and 3.0's rule
-            opt.huber = opt.soft = opt.mimo = opt.noref = opt.wow = false;
+            opt.huber = opt.soft = opt.mimo = opt.noref = opt.wow = opt.level_even = false;
+            opt.lvl_gain = 0.13;
+            opt.eq_fine = 0.0;
+            opt.tf_level.kind = opt.tf_coded.kind = 0;
             opt.const_lag = 0.0;
         }
     }
@@ -60,11 +76,19 @@ int wmain(int argc, wchar_t** argv) {
     };
     v4::Report rep;
     std::vector<std::vector<double>> inst;
-    auto y = v4::separate(planar(orig), planar(kar), orig.rate, opt, &rep, nullptr, inst_path ? &inst : nullptr);
+    const unsigned long t0 = GetTickCount();
+    int last = -1;
+    auto progress = [&](int pct) {
+        if (pct != last) std::fprintf(stderr, "%3d%% %6.2f s\n", pct, (GetTickCount() - t0) / 1000.0);
+        last = pct;
+        return true;
+    };
+    auto y = v4::separate(planar(orig), planar(kar), orig.rate, opt, &rep,
+                          show_progress ? std::function<bool(int)>(progress) : nullptr, inst_path ? &inst : nullptr);
     std::printf("lag %ld sign %d drift_line %d lag_start %.3f lag_end %.3f stretch %.3f resampled %d "
-                "level_gain %.3f level_applied %d soft_q %.2f mimo %d lowpass %.0f wow_lowband %d\n",
+                "level_gain %.3f level_applied %d soft_q %.2f mimo %d lowpass %.0f wow_lowband %d eq_fine %d smoothed %d\n",
                 rep.lag, rep.sign, (int)rep.drift_line, rep.lag_start, rep.lag_end, rep.stretch, (int)rep.resampled,
-                rep.level_gain, (int)rep.level_applied, rep.soft_q, (int)rep.mimo, rep.lowpass_hz, (int)rep.wow_lowband);
+                rep.level_gain, (int)rep.level_applied, rep.soft_q, (int)rep.mimo, rep.lowpass_hz, (int)rep.wow_lowband, (int)rep.eq_fine, rep.smoothed);
     Audio out;
     out.rate = orig.rate;
     out.channels = orig.channels;
